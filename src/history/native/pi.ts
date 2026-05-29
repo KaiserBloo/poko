@@ -2,6 +2,7 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { resolvePiImportModel, resolvePiSessionDir } from "../pi.ts";
 import type { RawHistoryMessage, RawHistorySession } from "../types.ts";
+import { nativeMessageAnnotations } from "./annotations.ts";
 import {
   conversationMessages,
   countConversationMessages,
@@ -155,14 +156,29 @@ const renderPiSession = (
       `poko:pi:message:${session.sourceAgent}:${session.id}:${message.id ?? index}:${message.role}`,
     );
     const date = messageDate(message, created);
+    const rendered = renderPiMessage(message, date, importModel, entryId);
     rows.push({
       type: "message",
       id: entryId,
       parentId,
       timestamp: date.toISOString(),
-      message: renderPiMessage(message, date, importModel),
+      message: rendered.message,
     });
     parentId = entryId;
+
+    if (rendered.toolResult) {
+      const resultId = piEntryId(
+        `poko:pi:tool-result:${session.sourceAgent}:${session.id}:${message.id ?? index}`,
+      );
+      rows.push({
+        type: "message",
+        id: resultId,
+        parentId,
+        timestamp: date.toISOString(),
+        message: rendered.toolResult,
+      });
+      parentId = resultId;
+    }
   }
 
   return renderJsonl(rows);
@@ -172,24 +188,65 @@ const renderPiMessage = (
   message: RawHistoryMessage,
   timestamp: Date,
   importModel: { provider: string; model: string },
-): unknown => {
+  entryId: string,
+): { message: unknown; toolResult?: unknown } => {
   if (message.role === "user") {
     return {
-      role: "user",
-      content: message.text,
-      timestamp: timestampMs(timestamp),
+      message: {
+        role: "user",
+        content: message.text,
+        timestamp: timestampMs(timestamp),
+      },
     };
   }
 
+  const annotations = nativeMessageAnnotations(message);
+  const content: unknown[] = [];
+
+  if (annotations.thinkingText) {
+    content.push({ type: "thinking", thinking: annotations.thinkingText });
+  }
+
+  if (annotations.visibleText) {
+    content.push({ type: "text", text: annotations.visibleText });
+  }
+
+  const toolUse = annotations.toolUses[0];
+  const toolCallId =
+    toolUse?.id ?? piEntryId(`poko:pi:tool-call:${entryId}:${toolUse?.name}`);
+
+  if (toolUse) {
+    content.push({
+      type: "toolCall",
+      id: toolCallId,
+      name: toolUse.name,
+      arguments: toolUse.input,
+    });
+  }
+
   return {
-    role: "assistant",
-    content: [{ type: "text", text: message.text }],
-    api: "poko",
-    provider: importModel.provider,
-    model: importModel.model,
-    usage: emptyUsage(),
-    stopReason: "stop",
-    timestamp: timestampMs(timestamp),
+    message: {
+      role: "assistant",
+      content:
+        content.length > 0 ? content : [{ type: "text", text: message.text }],
+      api: "poko",
+      provider: importModel.provider,
+      model: importModel.model,
+      usage: emptyUsage(),
+      stopReason: toolUse ? "toolUse" : "stop",
+      timestamp: timestampMs(timestamp),
+    },
+    toolResult:
+      toolUse && annotations.toolResult
+        ? {
+            role: "toolResult",
+            toolCallId,
+            toolName: toolUse.name,
+            content: [{ type: "text", text: annotations.toolResult }],
+            isError: false,
+            timestamp: timestampMs(timestamp, 1),
+          }
+        : undefined,
   };
 };
 

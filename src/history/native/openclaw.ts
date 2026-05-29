@@ -5,6 +5,7 @@ import {
   resolveOpenClawSessionStorePath,
 } from "../openclaw.ts";
 import type { RawHistoryMessage, RawHistorySession } from "../types.ts";
+import { nativeMessageAnnotations } from "./annotations.ts";
 import {
   conversationMessages,
   countConversationMessages,
@@ -196,14 +197,29 @@ const renderOpenClawSession = (
       `poko:openclaw:message:${session.sourceAgent}:${session.id}:${message.id ?? index}:${message.role}`,
     );
     const date = messageDate(message, created);
+    const rendered = renderOpenClawMessage(message, entryId);
     rows.push({
       type: "message",
       id: entryId,
       parentId,
       timestamp: date.toISOString(),
-      message: renderOpenClawMessage(message),
+      message: rendered.message,
     });
     parentId = entryId;
+
+    if (rendered.toolResult) {
+      const resultId = openClawEntryId(
+        `poko:openclaw:tool-result:${session.sourceAgent}:${session.id}:${message.id ?? index}`,
+      );
+      rows.push({
+        type: "message",
+        id: resultId,
+        parentId,
+        timestamp: date.toISOString(),
+        message: rendered.toolResult,
+      });
+      parentId = resultId;
+    }
   }
 
   return renderJsonl(rows);
@@ -211,17 +227,61 @@ const renderOpenClawSession = (
 
 const renderOpenClawMessage = (
   message: RawHistoryMessage,
-): Record<string, unknown> => {
+  entryId: string,
+): {
+  message: Record<string, unknown>;
+  toolResult?: Record<string, unknown>;
+} => {
   if (message.role === "user") {
     return {
-      role: "user",
-      content: message.text,
+      message: {
+        role: "user",
+        content: message.text,
+      },
     };
   }
 
+  const annotations = nativeMessageAnnotations(message);
+  const content: unknown[] = [];
+
+  if (annotations.thinkingText) {
+    content.push({ type: "thinking", thinking: annotations.thinkingText });
+  }
+
+  if (annotations.visibleText) {
+    content.push({ type: "text", text: annotations.visibleText });
+  }
+
+  const toolUse = annotations.toolUses[0];
+  const toolCallId =
+    toolUse?.id ??
+    openClawEntryId(`poko:openclaw:tool-call:${entryId}:${toolUse?.name}`);
+
+  if (toolUse) {
+    content.push({
+      type: "toolCall",
+      id: toolCallId,
+      name: toolUse.name,
+      arguments: toolUse.input,
+    });
+  }
+
   return {
-    role: "assistant",
-    content: [{ type: "text", text: message.text }],
+    message: {
+      role: "assistant",
+      content:
+        content.length > 0 ? content : [{ type: "text", text: message.text }],
+    },
+    toolResult:
+      toolUse && annotations.toolResult
+        ? {
+            role: "toolResult",
+            toolCallId,
+            toolName: toolUse.name,
+            content: [{ type: "text", text: annotations.toolResult }],
+            isError: false,
+          }
+        : undefined,
   };
 };
 

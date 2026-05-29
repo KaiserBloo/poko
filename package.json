@@ -17,7 +17,13 @@
     "check": "biome check .",
     "format": "biome format --write .",
     "build": "bun build ./src/cli.ts --outdir ./dist --target bun",
-    "compile": "bun build ./src/cli.ts --compile --outfile ./bin/poko"
+    "compile": "bun build ./src/cli.ts --compile --outfile ./bin/poko",
+    "lab": "bun lab/poko-lab.ts",
+    "lab:reset": "bun lab/poko-lab.ts reset",
+    "lab:smoke": "bun lab/poko-lab.ts smoke",
+    "lab:scenario": "bun lab/poko-lab.ts scenario",
+    "lab:report": "bun lab/poko-lab.ts report",
+    "lab:docker": "docker compose -f lab/docker-compose.yml run --rm poko-lab"
   },
   "keywords": [
     "ai",

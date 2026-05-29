@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathExists } from "../../core/config.ts";
 import {
@@ -42,6 +43,30 @@ type CursorRenderedSession = {
   head: Record<string, unknown>;
   composerData: Record<string, unknown>;
   bubbles: Array<{ key: string; value: Record<string, unknown> }>;
+};
+
+type CursorRenderedBubble = {
+  header: Record<string, unknown>;
+  key: string;
+  value: Record<string, unknown>;
+};
+
+type CursorMessageAnnotations = {
+  visibleText: string;
+  thinkingText?: string;
+  toolResult?: string;
+  toolUses: CursorToolUse[];
+  fileRefs: CursorFileRef[];
+};
+
+type CursorToolUse = {
+  name: string;
+  input: Record<string, unknown>;
+};
+
+type CursorFileRef = {
+  relativePath: string;
+  line?: number;
 };
 
 type CursorWriteStats = {
@@ -211,26 +236,20 @@ const renderCursorSession = (input: {
     projectRoot: input.projectRoot,
   };
   const messages = conversationMessages(input.session);
-  const headers = messages.map((message, index) =>
-    renderCursorHeader(input.session, message, index),
+  const renderedBubbles = messages.flatMap((message, index) =>
+    renderCursorMessageBubbles({
+      composerId,
+      session: input.session,
+      message,
+      index,
+      created,
+      projectRoot: input.projectRoot,
+      workspace: input.workspace,
+      pokoImport,
+    }),
   );
-  const bubbles = messages.map((message, index) => {
-    const bubbleId = cursorBubbleId(input.session, message, index);
-
-    return {
-      key: `bubbleId:${composerId}:${bubbleId}`,
-      value: renderCursorBubble({
-        session: input.session,
-        message,
-        index,
-        bubbleId,
-        created,
-        projectRoot: input.projectRoot,
-        workspace: input.workspace,
-        pokoImport,
-      }),
-    };
-  });
+  const headers = renderedBubbles.map((bubble) => bubble.header);
+  const bubbles = renderedBubbles.map(({ key, value }) => ({ key, value }));
 
   const head = {
     type: "head",
@@ -362,21 +381,126 @@ const renderCursorSession = (input: {
   };
 };
 
-const renderCursorHeader = (
-  session: RawHistorySession,
-  message: RawHistoryMessage,
-  index: number,
-): Record<string, unknown> => {
+const renderCursorMessageBubbles = (input: {
+  composerId: string;
+  session: RawHistorySession;
+  message: RawHistoryMessage;
+  index: number;
+  created: Date;
+  projectRoot: string;
+  workspace: CursorWorkspace;
+  pokoImport: Record<string, unknown>;
+}): CursorRenderedBubble[] => {
+  const annotations = cursorMessageAnnotations(
+    input.message,
+    input.projectRoot,
+  );
+  const bubbleId = cursorBubbleId(input.session, input.message, input.index);
+  const bubbles: CursorRenderedBubble[] = [];
+
+  if (annotations.thinkingText) {
+    const thinkingBubbleId = cursorThinkingBubbleId(
+      input.session,
+      input.message,
+      input.index,
+    );
+    const thinkingMessage = {
+      ...input.message,
+      text: "",
+    };
+
+    bubbles.push({
+      header: {
+        bubbleId: thinkingBubbleId,
+        type: 2,
+      },
+      key: `bubbleId:${input.composerId}:${thinkingBubbleId}`,
+      value: renderCursorBubble({
+        message: thinkingMessage,
+        index: input.index,
+        bubbleId: thinkingBubbleId,
+        created: input.created,
+        projectRoot: input.projectRoot,
+        workspace: input.workspace,
+        pokoImport: input.pokoImport,
+        thinkingText: annotations.thinkingText,
+        fileRefs: [],
+      }),
+    });
+  }
+
+  if (annotations.visibleText || input.message.role === "user") {
+    const messageForBubble = {
+      ...input.message,
+      text: annotations.visibleText || input.message.text,
+    };
+
+    bubbles.push({
+      header: renderCursorHeader({
+        bubbleId,
+        role: input.message.role,
+        text: messageForBubble.text,
+      }),
+      key: `bubbleId:${input.composerId}:${bubbleId}`,
+      value: renderCursorBubble({
+        message: messageForBubble,
+        index: input.index,
+        bubbleId,
+        created: input.created,
+        projectRoot: input.projectRoot,
+        workspace: input.workspace,
+        pokoImport: input.pokoImport,
+        fileRefs: annotations.fileRefs,
+      }),
+    });
+  }
+
+  for (const [toolIndex, toolUse] of annotations.toolUses.entries()) {
+    const toolBubbleId = cursorToolBubbleId(
+      input.session,
+      input.message,
+      input.index,
+      toolIndex,
+      toolUse.name,
+    );
+
+    bubbles.push({
+      header: {
+        bubbleId: toolBubbleId,
+        type: 2,
+      },
+      key: `bubbleId:${input.composerId}:${toolBubbleId}`,
+      value: renderCursorToolBubble({
+        toolUse,
+        toolIndex,
+        bubbleId: toolBubbleId,
+        message: input.message,
+        created: input.created,
+        projectRoot: input.projectRoot,
+        result: annotations.toolResult,
+        fileRefs: annotations.fileRefs,
+      }),
+    });
+  }
+
+  return bubbles;
+};
+
+const renderCursorHeader = (input: {
+  bubbleId: string;
+  role: RawHistoryMessage["role"];
+  text: string;
+}): Record<string, unknown> => {
   const header: Record<string, unknown> = {
-    bubbleId: cursorBubbleId(session, message, index),
-    type: message.role === "user" ? 1 : 2,
+    bubbleId: input.bubbleId,
+    type: input.role === "user" ? 1 : 2,
   };
 
-  if (message.role === "assistant") {
+  if (input.role === "assistant") {
     header.grouping = {
       isRenderable: true,
       hasText: true,
-      isShortPlainText: message.text.length <= 240,
+      isShortPlainText: input.text.length <= 240,
       isKeptFinalAiVisibleOutsideWorkedForGroup: true,
     };
   }
@@ -385,7 +509,6 @@ const renderCursorHeader = (
 };
 
 const renderCursorBubble = (input: {
-  session: RawHistorySession;
   message: RawHistoryMessage;
   index: number;
   bubbleId: string;
@@ -393,8 +516,11 @@ const renderCursorBubble = (input: {
   projectRoot: string;
   workspace: CursorWorkspace;
   pokoImport: Record<string, unknown>;
+  thinkingText?: string;
+  fileRefs: CursorFileRef[];
 }): Record<string, unknown> => {
   const timestamp = messageDate(input.message, input.created).toISOString();
+  const fileLinks = cursorFileLinks(input.fileRefs);
   const common = {
     _v: 3,
     type: input.message.role === "user" ? 1 : 2,
@@ -461,6 +587,7 @@ const renderCursorBubble = (input: {
     isQuickSearchQuery: false,
     mcpDescriptors: [],
     workspaceUris: [cursorFileUri(input.projectRoot)],
+    ...(fileLinks.length > 0 ? { fileLinks } : {}),
     text: input.message.text,
     modelInfo: {
       modelName: CURSOR_IMPORT_MODEL,
@@ -475,6 +602,13 @@ const renderCursorBubble = (input: {
       ...common,
       richText: cursorRichText(input.message.text),
       editToolSupportsSearchAndReplace: false,
+      ...(input.fileRefs.length > 0
+        ? {
+            attachedFileCodeChunksMetadataOnly: input.fileRefs.map(
+              cursorAttachedFileMetadata,
+            ),
+          }
+        : {}),
     };
   }
 
@@ -486,8 +620,383 @@ const renderCursorBubble = (input: {
       clientSettleTime: timestampMs(new Date(timestamp), input.index),
       clientEndTime: timestampMs(new Date(timestamp), input.index),
     },
+    ...(input.thinkingText
+      ? {
+          thinking: {
+            text: input.thinkingText,
+            signature: "",
+          },
+          thinkingDurationMs: 1000,
+          thinkingStyle: "default",
+        }
+      : {}),
   };
 };
+
+const renderCursorToolBubble = (input: {
+  toolUse: CursorToolUse;
+  toolIndex: number;
+  bubbleId: string;
+  message: RawHistoryMessage;
+  created: Date;
+  projectRoot: string;
+  result?: string;
+  fileRefs: CursorFileRef[];
+}): Record<string, unknown> => {
+  const timestamp = messageDate(input.message, input.created).toISOString();
+  const normalized = normalizeCursorToolUse(input.toolUse, input.projectRoot);
+  const fileLinks = cursorFileLinks(input.fileRefs);
+
+  return {
+    _v: 3,
+    type: 2,
+    bubbleId: input.bubbleId,
+    text: "",
+    createdAt: timestamp,
+    approximateLintErrors: [],
+    lints: [],
+    codebaseContextChunks: [],
+    commits: [],
+    pullRequests: [],
+    attachedCodeChunks: [],
+    assistantSuggestedDiffs: [],
+    gitDiffs: [],
+    interpreterResults: [],
+    images: [],
+    attachedFolders: [],
+    attachedFoldersNew: [],
+    userResponsesToSuggestedCodeBlocks: [],
+    suggestedCodeBlocks: [],
+    diffsForCompressingFiles: [],
+    relevantFiles: [],
+    toolResults: [],
+    notepads: [],
+    capabilities: [],
+    capabilityStatuses: emptyCursorCapabilityStatuses(),
+    multiFileLinterErrors: [],
+    diffHistories: [],
+    recentLocationsHistory: [],
+    recentlyViewedFiles: [],
+    isAgentic: true,
+    fileDiffTrajectories: [],
+    existedSubsequentTerminalCommand: false,
+    existedPreviousTerminalCommand: false,
+    docsReferences: [],
+    webReferences: [],
+    aiWebSearchResults: [],
+    requestId: "",
+    attachedFoldersListDirResults: [],
+    humanChanges: [],
+    summarizedComposers: [],
+    cursorRules: [],
+    contextPieces: [],
+    editTrailContexts: [],
+    allThinkingBlocks: [],
+    diffsSinceLastApply: [],
+    deletedFiles: [],
+    supportedTools: [],
+    tokenCount: {
+      inputTokens: 0,
+      outputTokens: 0,
+    },
+    attachedFileCodeChunksMetadataOnly: input.fileRefs.map(
+      cursorAttachedFileMetadata,
+    ),
+    consoleLogs: [],
+    uiElementPicked: [],
+    isRefunded: false,
+    knowledgeItems: [],
+    documentationSelections: [],
+    externalLinks: [],
+    useWeb: false,
+    projectLayouts: [],
+    unifiedMode: 2,
+    capabilityContexts: [],
+    todos: [],
+    isQuickSearchQuery: false,
+    mcpDescriptors: [],
+    workspaceUris: [cursorFileUri(input.projectRoot)],
+    ...(fileLinks.length > 0 ? { fileLinks } : {}),
+    modelInfo: {
+      modelName: CURSOR_IMPORT_MODEL,
+    },
+    workspaceProjectDir: cursorProjectDir(input.projectRoot),
+    context: emptyCursorContext(),
+    capabilityType: normalized.capabilityType,
+    toolFormerData: {
+      tool: normalized.tool,
+      toolIndex: input.toolIndex + 1,
+      modelCallId: deterministicUuid(
+        `poko:cursor:model-call:${input.message.id ?? input.bubbleId}`,
+      ),
+      toolCallId: deterministicCursorToolCallId(
+        `poko:cursor:tool-call:${input.bubbleId}`,
+      ),
+      status: "completed",
+      rawArgs: JSON.stringify(normalized.rawArgs),
+      name: normalized.name,
+      params: JSON.stringify(normalized.params),
+      additionalData: {},
+      result: input.result ?? "",
+    },
+  };
+};
+
+const cursorMessageAnnotations = (
+  message: RawHistoryMessage,
+  projectRoot: string,
+): CursorMessageAnnotations => {
+  const rawToolUses = cursorToolUsesFromRaw(message.raw);
+  const fileRefs = new Map<string, CursorFileRef>();
+  const visibleLines: string[] = [];
+  let thinkingText: string | undefined;
+  let toolResult: string | undefined;
+  const textToolUses: CursorToolUse[] = [];
+
+  for (const line of message.text.split("\n")) {
+    const thinkingMatch = line.match(/^\[thinking\]\s*(.+)$/i);
+
+    if (thinkingMatch?.[1]) {
+      thinkingText = appendAnnotationText(thinkingText, thinkingMatch[1]);
+      continue;
+    }
+
+    const toolResultMatch = line.match(/^Tool result:\s*(.+)$/i);
+
+    if (toolResultMatch?.[1]) {
+      toolResult = appendAnnotationText(toolResult, toolResultMatch[1]);
+      continue;
+    }
+
+    const toolUseMatch = line.match(/^\[(?:tool_use|tool_call):([^\]]+)\]$/i);
+
+    if (toolUseMatch?.[1]) {
+      textToolUses.push({
+        name: toolUseMatch[1],
+        input: {},
+      });
+      continue;
+    }
+
+    visibleLines.push(line);
+  }
+
+  for (const ref of [
+    ...cursorFileRefsFromText(message.text, projectRoot),
+    ...rawToolUses.flatMap((toolUse) =>
+      cursorFileRefsFromToolInput(toolUse.input, projectRoot),
+    ),
+  ]) {
+    fileRefs.set(`${ref.relativePath}:${ref.line ?? ""}`, ref);
+  }
+
+  const toolUses = rawToolUses.length > 0 ? rawToolUses : textToolUses;
+
+  return {
+    visibleText: visibleLines.join("\n").trim(),
+    thinkingText,
+    toolResult,
+    toolUses,
+    fileRefs: [...fileRefs.values()],
+  };
+};
+
+const cursorToolUsesFromRaw = (raw: unknown): CursorToolUse[] => {
+  const content = rawMessageContent(raw);
+
+  return content.filter(isRecord).flatMap((part) => {
+    if (
+      (part.type !== "tool_use" && part.type !== "toolCall") ||
+      typeof part.name !== "string"
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        name: part.name,
+        input: isRecord(part.input) ? part.input : {},
+      },
+    ];
+  });
+};
+
+const rawMessageContent = (raw: unknown): unknown[] => {
+  if (!isRecord(raw)) {
+    return [];
+  }
+
+  if (isRecord(raw.payload) && Array.isArray(raw.payload.content)) {
+    return raw.payload.content;
+  }
+
+  if (isRecord(raw.message) && Array.isArray(raw.message.content)) {
+    return raw.message.content;
+  }
+
+  return [];
+};
+
+const appendAnnotationText = (
+  existing: string | undefined,
+  next: string,
+): string => (existing ? `${existing}\n${next}` : next.trim());
+
+const normalizeCursorToolUse = (
+  toolUse: CursorToolUse,
+  projectRoot: string,
+): {
+  name: string;
+  tool: number;
+  capabilityType: number;
+  rawArgs: Record<string, unknown>;
+  params: Record<string, unknown>;
+} => {
+  const name = toolUse.name.toLowerCase();
+  const filePath = cursorToolInputPath(toolUse.input);
+
+  if (name === "read" || name === "read_file" || name === "read_file_v2") {
+    const relativePath = filePath
+      ? normalizeCursorRelativePath(filePath, projectRoot)?.relativePath
+      : undefined;
+
+    return {
+      name: "read_file",
+      tool: 40,
+      capabilityType: 15,
+      rawArgs: {
+        target_file: relativePath ?? filePath ?? "",
+      },
+      params: {
+        targetFile: relativePath ?? filePath ?? "",
+        charsLimit: 20000,
+        ...(relativePath
+          ? {
+              effectiveUri: cursorFileUri(path.join(projectRoot, relativePath)),
+            }
+          : {}),
+      },
+    };
+  }
+
+  return {
+    name: toolUse.name,
+    tool: 19,
+    capabilityType: 15,
+    rawArgs: toolUse.input,
+    params: {
+      tools: [toolUse.name],
+      fileOutputThresholdBytes: 20000,
+    },
+  };
+};
+
+const cursorToolInputPath = (
+  input: Record<string, unknown>,
+): string | undefined => {
+  for (const key of ["file_path", "target_file", "targetFile", "path"]) {
+    const value = input[key];
+
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+
+  return undefined;
+};
+
+const cursorFileRefsFromToolInput = (
+  input: Record<string, unknown>,
+  projectRoot: string,
+): CursorFileRef[] => {
+  const filePath = cursorToolInputPath(input);
+  const ref = filePath
+    ? normalizeCursorRelativePath(filePath, projectRoot)
+    : undefined;
+
+  return ref ? [ref] : [];
+};
+
+const cursorFileRefsFromText = (
+  text: string,
+  projectRoot: string,
+): CursorFileRef[] => {
+  const refs: CursorFileRef[] = [];
+  const pattern =
+    /(?:^|[\s("'])((?:\.?\.?\/)?[A-Za-z0-9._/-]+\.[A-Za-z0-9]+)(?::(\d+))?/g;
+  let match: RegExpExecArray | null;
+
+  match = pattern.exec(text);
+
+  while (match) {
+    const ref = normalizeCursorRelativePath(
+      match[1] ?? "",
+      projectRoot,
+      match[2] ? Number.parseInt(match[2], 10) : undefined,
+    );
+
+    if (ref) {
+      refs.push(ref);
+    }
+
+    match = pattern.exec(text);
+  }
+
+  return refs;
+};
+
+const normalizeCursorRelativePath = (
+  value: string,
+  projectRoot: string,
+  line?: number,
+): CursorFileRef | undefined => {
+  const lineMatch = value.match(/^(.*?):(\d+)$/);
+  const withoutLine = lineMatch?.[1] ?? value;
+  const parsedLine =
+    line ?? (lineMatch?.[2] ? Number.parseInt(lineMatch[2], 10) : undefined);
+  const resolved = path.isAbsolute(withoutLine)
+    ? withoutLine
+    : path.resolve(projectRoot, withoutLine);
+  const relativePath = path.relative(projectRoot, resolved);
+
+  if (
+    relativePath.startsWith("..") ||
+    path.isAbsolute(relativePath) ||
+    !relativePath
+  ) {
+    return undefined;
+  }
+
+  return {
+    relativePath: normalizePath(relativePath),
+    ...(parsedLine && Number.isFinite(parsedLine) ? { line: parsedLine } : {}),
+  };
+};
+
+const cursorFileLinks = (refs: CursorFileRef[]): string[] =>
+  refs.map((ref) =>
+    JSON.stringify({
+      displayName: path.basename(ref.relativePath),
+      relativeWorkspacePath: ref.relativePath,
+    }),
+  );
+
+const cursorAttachedFileMetadata = (
+  ref: CursorFileRef,
+): Record<string, unknown> => ({
+  relativeWorkspacePath: ref.relativePath,
+  startLineNumber: ref.line ?? 1,
+  lines: [],
+  languageIdentifier: "",
+  intent: 8,
+  isOnlyIncludedFromFolder: false,
+});
+
+const deterministicCursorToolCallId = (value: string): string =>
+  `toolu_${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
+
+const normalizePath = (value: string): string =>
+  value.split(path.sep).join("/");
 
 const writeCursorImports = (input: {
   globalDatabase: Database;
@@ -761,6 +1270,26 @@ const cursorBubbleId = (
 ): string =>
   deterministicUuid(
     `poko:cursor:bubble:${session.sourceAgent}:${session.id}:${message.id ?? index}:${message.role}`,
+  );
+
+const cursorToolBubbleId = (
+  session: RawHistorySession,
+  message: RawHistoryMessage,
+  index: number,
+  toolIndex: number,
+  toolName: string,
+): string =>
+  deterministicUuid(
+    `poko:cursor:tool-bubble:${session.sourceAgent}:${session.id}:${message.id ?? index}:${toolIndex}:${toolName}`,
+  );
+
+const cursorThinkingBubbleId = (
+  session: RawHistorySession,
+  message: RawHistoryMessage,
+  index: number,
+): string =>
+  deterministicUuid(
+    `poko:cursor:thinking-bubble:${session.sourceAgent}:${session.id}:${message.id ?? index}`,
   );
 
 const cursorRichText = (text: string): string =>

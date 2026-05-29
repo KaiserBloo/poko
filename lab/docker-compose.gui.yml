@@ -1,0 +1,19 @@
+services:
+  poko-gui:
+    image: lscr.io/linuxserver/webtop:ubuntu-xfce
+    shm_size: "2gb"
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-Europe/London}"
+      POKO_LAB_ROOT: /lab-state
+    ports:
+      - "3001:3000"
+      - "3002:3001"
+    volumes:
+      - ..:/workspace/poko
+      - ${HOME}/.poko/lab:/lab-state
+      - ${HOME}/.poko/lab/gui-config:/config
+    working_dir: /workspace/poko

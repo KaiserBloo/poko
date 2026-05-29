@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { RawHistoryMessage, RawHistorySession } from "../types.ts";
+import { nativeMessageAnnotations } from "./annotations.ts";
 import {
   conversationMessages,
   countConversationMessages,
@@ -220,22 +221,13 @@ const renderOpenCodeMessage = (input: {
     id: messageId,
     sessionID: input.sessionId,
   };
-  const parts = [
-    {
-      id: deterministicPrefixedId(
-        "prt",
-        `poko:opencode:part:${input.session.sourceAgent}:${input.session.id}:${messageId}`,
-      ),
-      sessionID: input.sessionId,
-      messageID: messageId,
-      type: "text",
-      text: input.message.text,
-      time: {
-        start: createdMs,
-        end: createdMs,
-      },
-    },
-  ];
+  const parts = renderOpenCodeParts({
+    session: input.session,
+    sessionId: input.sessionId,
+    messageId,
+    message: input.message,
+    createdMs,
+  });
 
   if (input.message.role === "user") {
     return {
@@ -285,6 +277,129 @@ const renderOpenCodeMessage = (input: {
     parts,
   };
 };
+
+const renderOpenCodeParts = (input: {
+  session: RawHistorySession;
+  sessionId: string;
+  messageId: string;
+  message: RawHistoryMessage;
+  createdMs: number;
+}): Array<Record<string, unknown>> => {
+  if (input.message.role !== "assistant") {
+    return [
+      openCodeTextPart({
+        ...input,
+        text: input.message.text,
+        key: "user-text",
+      }),
+    ];
+  }
+
+  const annotations = nativeMessageAnnotations(input.message);
+  const parts: Array<Record<string, unknown>> = [];
+
+  if (annotations.thinkingText) {
+    parts.push({
+      id: openCodePartId(input, "reasoning"),
+      sessionID: input.sessionId,
+      messageID: input.messageId,
+      type: "reasoning",
+      text: annotations.thinkingText,
+      time: {
+        start: input.createdMs,
+        end: input.createdMs,
+      },
+    });
+  }
+
+  if (annotations.visibleText) {
+    parts.push(
+      openCodeTextPart({
+        ...input,
+        text: annotations.visibleText,
+        key: "assistant-text",
+      }),
+    );
+  }
+
+  for (const [index, toolUse] of annotations.toolUses.entries()) {
+    const callID =
+      toolUse.id ??
+      deterministicPrefixedId(
+        "call",
+        `poko:opencode:tool-call:${input.session.sourceAgent}:${input.session.id}:${input.messageId}:${index}`,
+      );
+    parts.push({
+      id: openCodePartId(input, `tool-${index}`),
+      sessionID: input.sessionId,
+      messageID: input.messageId,
+      type: "tool",
+      callID,
+      tool: toolUse.name,
+      state: {
+        status: annotations.toolResult ? "completed" : "pending",
+        input: toolUse.input,
+        ...(annotations.toolResult
+          ? {
+              output: annotations.toolResult,
+              title: toolUse.name,
+              metadata: {},
+              time: {
+                start: input.createdMs,
+                end: input.createdMs,
+              },
+            }
+          : { raw: JSON.stringify(toolUse.input) }),
+      },
+      metadata: {
+        originator: "poko",
+      },
+    });
+  }
+
+  if (parts.length === 0) {
+    parts.push(
+      openCodeTextPart({
+        ...input,
+        text: input.message.text,
+        key: "assistant-fallback",
+      }),
+    );
+  }
+
+  return parts;
+};
+
+const openCodeTextPart = (input: {
+  session: RawHistorySession;
+  sessionId: string;
+  messageId: string;
+  createdMs: number;
+  text: string;
+  key: string;
+}): Record<string, unknown> => ({
+  id: openCodePartId(input, input.key),
+  sessionID: input.sessionId,
+  messageID: input.messageId,
+  type: "text",
+  text: input.text,
+  time: {
+    start: input.createdMs,
+    end: input.createdMs,
+  },
+});
+
+const openCodePartId = (
+  input: {
+    session: RawHistorySession;
+    messageId: string;
+  },
+  key: string,
+): string =>
+  deterministicPrefixedId(
+    "prt",
+    `poko:opencode:part:${input.session.sourceAgent}:${input.session.id}:${input.messageId}:${key}`,
+  );
 
 const openCodeSessionId = (session: RawHistorySession): string =>
   deterministicPrefixedId(

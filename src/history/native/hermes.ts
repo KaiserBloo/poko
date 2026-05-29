@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { resolveHermesStateDbPath } from "../hermes.ts";
 import type { RawHistoryMessage, RawHistorySession } from "../types.ts";
+import { nativeMessageAnnotations } from "./annotations.ts";
 import {
   conversationMessages,
   countConversationMessages,
@@ -86,6 +87,11 @@ export async function syncHermesNativeHistory(
       const created = sessionCreatedDate(session, fallbackDate);
       const updated = sessionUpdatedDate(session, created);
       const title = resolveHermesTitle(database, session, sessionId);
+      const toolCallCount = messages.reduce(
+        (count, message) =>
+          count + nativeMessageAnnotations(message).toolUses.length,
+        0,
+      );
       const modelConfig: HermesImportConfig = {
         pokoImport: {
           originator: "poko",
@@ -132,7 +138,7 @@ export async function syncHermesNativeHistory(
           timestampSeconds(updated),
           "imported",
           messages.length,
-          0,
+          toolCallCount,
           0,
           0,
           0,
@@ -365,21 +371,49 @@ const insertHermesMessage = (
   fallbackDate: Date,
 ): void => {
   const date = messageDate(message, fallbackDate);
+  const annotations = nativeMessageAnnotations(message);
+  const toolCalls =
+    annotations.toolUses.length > 0
+      ? annotations.toolUses.map((toolUse, toolIndex) => ({
+          id:
+            toolUse.id ??
+            deterministicUuid(
+              `poko:hermes:tool-use:${sessionId}:${index}:${toolIndex}`,
+            ),
+          type: "function",
+          function: {
+            name: toolUse.name,
+            arguments: JSON.stringify(toolUse.input),
+          },
+          result: annotations.toolResult,
+        }))
+      : undefined;
+  const visibleContent =
+    annotations.visibleText ||
+    (!annotations.thinkingText && annotations.toolUses.length === 0
+      ? message.text
+      : "");
 
   database
     .query(
       `insert into messages (
-        session_id, role, content, timestamp, token_count, finish_reason,
+        session_id, role, content, tool_call_id, tool_calls, tool_name,
+        timestamp, token_count, finish_reason, reasoning, reasoning_content,
         observed
-      ) values (?, ?, ?, ?, ?, ?, ?)`,
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sessionId,
       message.role,
-      message.text,
+      visibleContent,
+      toolCalls?.[0]?.id ?? null,
+      toolCalls ? JSON.stringify(toolCalls) : null,
+      annotations.toolUses[0]?.name ?? null,
       timestampSeconds(date, index),
       null,
       message.role === "assistant" ? "stop" : null,
+      annotations.thinkingText ?? null,
+      annotations.thinkingText ?? null,
       0,
     );
 };

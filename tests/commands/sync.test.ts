@@ -463,9 +463,11 @@ describe("poko sync", () => {
     expect(rows[0]?.type).toBe("session_meta");
     expect(rows.map((row) => row.type)).toEqual([
       "session_meta",
+      "event_msg",
       "response_item",
       "event_msg",
       "response_item",
+      "event_msg",
       "event_msg",
     ]);
     expect(
@@ -615,6 +617,209 @@ describe("poko sync", () => {
     );
   });
 
+  test("renders Cursor feature annotations as native bubble metadata", async () => {
+    await configureRepoHistoryStore();
+    await seedCodexFeatureSession();
+
+    await runSync({
+      cwd,
+      agent: "cursor",
+      logger: createMemoryLogger(),
+    });
+
+    const database = new Database(cursorGlobalStateDbPath, { readonly: true });
+    try {
+      const headers = JSON.parse(
+        String(
+          (
+            database
+              .query("select value from ItemTable where key = ?")
+              .get("composer.composerHeaders") as { value: string }
+          ).value,
+        ),
+      ) as { allComposers: Array<{ composerId: string; name: string }> };
+      const composerId = headers.allComposers[0]?.composerId ?? "";
+      const composer = JSON.parse(
+        String(
+          (
+            database
+              .query("select value from cursorDiskKV where key = ?")
+              .get(`composerData:${composerId}`) as { value: string }
+          ).value,
+        ),
+      ) as { fullConversationHeadersOnly: Array<{ bubbleId: string }> };
+      expect(composer.fullConversationHeadersOnly).toHaveLength(4);
+
+      const bubbles = database
+        .query("select value from cursorDiskKV where key like ? order by key")
+        .all(`bubbleId:${composerId}:%`)
+        .map((row) =>
+          JSON.parse(String((row as { value: string }).value)),
+        ) as Array<{
+        text?: string;
+        thinking?: { text?: string };
+        fileLinks?: string[];
+        toolFormerData?: { name?: string; result?: string };
+      }>;
+      const assistantBubble = bubbles.find((bubble) =>
+        bubble.text?.includes("Feature matrix response"),
+      );
+      const thinkingBubble = bubbles.find((bubble) => bubble.thinking);
+      const toolBubble = bubbles.find((bubble) => bubble.toolFormerData);
+
+      expect(assistantBubble?.text).not.toContain("[thinking]");
+      expect(assistantBubble?.text).not.toContain("[tool_use");
+      expect(assistantBubble?.thinking).toBeUndefined();
+      expect(thinkingBubble?.thinking?.text).toContain(
+        "inspect the project registry",
+      );
+      expect(assistantBubble?.fileLinks?.join("\n")).toContain(
+        ".poko/poko.json",
+      );
+      expect(toolBubble?.toolFormerData?.name).toBe("read_file");
+      expect(toolBubble?.toolFormerData?.result).toContain("schemaVersion=1");
+    } finally {
+      database.close();
+    }
+  });
+
+  test("renders Claude feature annotations as native content blocks", async () => {
+    await configureRepoHistoryStore();
+    await seedCodexFeatureSession();
+    const logger = createMemoryLogger();
+
+    await runSync({
+      cwd,
+      agent: "claude",
+      logger,
+    });
+
+    const canonicalCwd = await canonicalPath(cwd);
+    const projectDir = path.join(
+      claudeHome,
+      "projects",
+      encodeClaudePath(canonicalCwd),
+    );
+    const sessionFiles = await listFiles(projectDir);
+    const rows = (await readFile(sessionFiles[0] ?? "", "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assistantRow = rows.find((row) => row.type === "assistant") as {
+      message?: { content?: Array<Record<string, unknown>> };
+      uuid?: string;
+    };
+    const toolResultRow = rows.find(
+      (row) =>
+        row.type === "user" &&
+        row.message &&
+        JSON.stringify(row.message).includes("tool_result"),
+    ) as { message?: { content?: Array<Record<string, unknown>> } };
+    const content = assistantRow.message?.content ?? [];
+    const textPart = content.find((part) => part.type === "text");
+    const thinkingPart = content.find((part) => part.type === "thinking");
+    const toolUsePart = content.find((part) => part.type === "tool_use");
+    const resultPart = toolResultRow.message?.content?.[0];
+
+    expect(textPart?.text).toBe(
+      "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+    );
+    expect(textPart?.text).not.toContain("[thinking]");
+    expect(thinkingPart?.thinking).toContain("inspect the project registry");
+    expect(toolUsePart).toMatchObject({
+      type: "tool_use",
+      name: "Read",
+      input: { file_path: ".poko/poko.json:45" },
+    });
+    expect(resultPart).toMatchObject({
+      type: "tool_result",
+      content: "schemaVersion=1",
+    });
+    expect(resultPart?.tool_use_id).toBe(toolUsePart?.id);
+  });
+
+  test("renders Codex feature annotations as native transcript events", async () => {
+    await configureRepoHistoryStore();
+    await seedClaudeFeatureSession();
+
+    await runSync({
+      cwd,
+      agent: "codex",
+      logger: createMemoryLogger(),
+    });
+
+    const sessionFiles = await listFiles(path.join(codexHome, "sessions"));
+    const rows = (await readFile(sessionFiles[0] ?? "", "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const payloads = rows
+      .filter((row) => row.type === "response_item")
+      .map((row) => row.payload as Record<string, unknown>);
+
+    expect(payloads.map((payload) => payload.type)).toEqual([
+      "message",
+      "reasoning",
+      "message",
+      "function_call",
+      "function_call_output",
+    ]);
+    expect(JSON.stringify(payloads)).not.toContain("[thinking]");
+    expect(JSON.stringify(payloads)).not.toContain("[tool_use");
+    expect(JSON.stringify(payloads[1]?.summary)).toContain(
+      "inspect the project registry",
+    );
+    expect(payloads[1]?.content).toBeNull();
+    expect(payloads[2]).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+        },
+      ],
+    });
+    expect(payloads[3]).toMatchObject({
+      type: "function_call",
+      name: "exec_command",
+    });
+    expect(payloads[3]?.arguments).toContain(".poko/poko.json:45");
+    expect(payloads[4]).toMatchObject({
+      type: "function_call_output",
+      output: "schemaVersion=1",
+    });
+
+    const eventPayloads = rows
+      .filter((row) => row.type === "event_msg")
+      .map((row) => row.payload as Record<string, unknown>);
+    expect(eventPayloads.map((payload) => payload.type)).toEqual([
+      "turn_started",
+      "user_message",
+      "agent_reasoning",
+      "agent_message",
+      "exec_command_end",
+      "task_complete",
+    ]);
+    expect(eventPayloads[2]).toMatchObject({
+      type: "agent_reasoning",
+      text: "inspect the project registry before editing",
+    });
+    expect(eventPayloads[3]?.type).toBe("agent_message");
+    expect(eventPayloads[3]?.message).toContain(
+      "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+    );
+    expect(eventPayloads[3]?.message).toContain("**Reasoning**");
+    expect(eventPayloads[3]?.message).toContain("**Tool: Read**");
+    expect(eventPayloads[3]?.message).toContain("schemaVersion=1");
+    expect(eventPayloads[4]).toMatchObject({
+      type: "exec_command_end",
+      aggregated_output: "schemaVersion=1",
+      status: "completed",
+    });
+    expect(JSON.stringify(eventPayloads[4])).toContain(".poko/poko.json:45");
+  });
+
   test("syncs project history into OpenCode through its import command", async () => {
     await configureRepoHistoryStore();
     await seedCodexSession();
@@ -693,6 +898,59 @@ describe("poko sync", () => {
     }
   });
 
+  test("renders OpenCode feature annotations as native parts", async () => {
+    await configureRepoHistoryStore();
+    await seedCodexFeatureSession();
+    const opencodeLog = path.join(cwd, "opencode.log");
+    const opencodeDbPath = path.join(cwd, "opencode-state.sqlite");
+    createOpenCodeStateDb(opencodeDbPath);
+    process.env.POKO_OPENCODE_BIN = await createFakeOpenCodeBin(
+      opencodeLog,
+      opencodeDbPath,
+    );
+
+    await runSync({
+      cwd,
+      agent: "opencode",
+      logger: createMemoryLogger(),
+    });
+
+    const exportFiles = await listFiles(
+      path.join(cwd, ".poko/native/opencode"),
+    );
+    const exported = JSON.parse(
+      await readFile(exportFiles[0] ?? "", "utf8"),
+    ) as {
+      messages: Array<{
+        info: { role: string };
+        parts: Array<Record<string, unknown>>;
+      }>;
+    };
+    const assistant = exported.messages.find(
+      (message) => message.info.role === "assistant",
+    );
+
+    expect(assistant?.parts.map((part) => part.type)).toEqual([
+      "reasoning",
+      "text",
+      "tool",
+    ]);
+    expect(JSON.stringify(assistant?.parts)).not.toContain("[thinking]");
+    expect(JSON.stringify(assistant?.parts)).not.toContain("[tool_use");
+    expect(assistant?.parts[0]?.text).toContain("inspect the project registry");
+    expect(assistant?.parts[1]?.text).toBe(
+      "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+    );
+    expect(assistant?.parts[2]).toMatchObject({
+      type: "tool",
+      tool: "Read",
+      state: {
+        status: "completed",
+        output: "schemaVersion=1",
+      },
+    });
+  });
+
   test("syncs Codex project history into Pi native history", async () => {
     await configureRepoHistoryStore();
     await seedCodexSession();
@@ -747,6 +1005,65 @@ describe("poko sync", () => {
     });
   });
 
+  test("renders Pi feature annotations as typed content and tool result", async () => {
+    await configureRepoHistoryStore();
+    await seedCodexFeatureSession();
+
+    await runSync({
+      cwd,
+      agent: "pi",
+      logger: createMemoryLogger(),
+    });
+
+    const canonicalCwd = await canonicalPath(cwd);
+    const sessionFiles = await listFiles(
+      path.join(piHome, "sessions", encodePiPath(canonicalCwd)),
+    );
+    const rows = (await readFile(sessionFiles[0] ?? "", "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assistant = rows.find(
+      (row) =>
+        row.type === "message" &&
+        (row.message as { role?: string } | undefined)?.role === "assistant",
+    ) as { message?: { content?: Array<Record<string, unknown>> } };
+    const toolResult = rows.find(
+      (row) =>
+        row.type === "message" &&
+        (row.message as { role?: string } | undefined)?.role === "toolResult",
+    ) as { message?: Record<string, unknown> };
+
+    expect(assistant.message?.content?.map((part) => part.type)).toEqual([
+      "thinking",
+      "text",
+      "toolCall",
+    ]);
+    expect(JSON.stringify(assistant.message?.content)).not.toContain(
+      "[thinking]",
+    );
+    expect(JSON.stringify(assistant.message?.content)).not.toContain(
+      "[tool_use",
+    );
+    expect(assistant.message?.content?.[0]?.thinking).toContain(
+      "inspect the project registry",
+    );
+    expect(assistant.message?.content?.[1]?.text).toBe(
+      "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+    );
+    expect(assistant.message?.content?.[2]).toMatchObject({
+      type: "toolCall",
+      name: "Read",
+      arguments: { file_path: ".poko/poko.json:45" },
+    });
+    expect(toolResult.message).toMatchObject({
+      role: "toolResult",
+      toolName: "Read",
+      isError: false,
+    });
+    expect(JSON.stringify(toolResult.message)).toContain("schemaVersion=1");
+  });
+
   test("syncs Codex project history into Hermes native history", async () => {
     await configureRepoHistoryStore();
     await seedCodexSession();
@@ -790,6 +1107,49 @@ describe("poko sync", () => {
       logger: createMemoryLogger(),
     });
     expect(captured).toBe(0);
+  });
+
+  test("renders Hermes feature annotations into reasoning and tool columns", async () => {
+    await configureRepoHistoryStore();
+    await seedCodexFeatureSession();
+
+    await runSync({
+      cwd,
+      agent: "hermes",
+      logger: createMemoryLogger(),
+    });
+
+    const database = new Database(path.join(hermesHome, "state.db"), {
+      readonly: true,
+    });
+    try {
+      expect(
+        database
+          .query("select tool_call_count from sessions where source = ?")
+          .get("poko"),
+      ).toEqual({ tool_call_count: 1 });
+      const assistant = database
+        .query(
+          "select content, tool_name, tool_calls, reasoning from messages where role = ?",
+        )
+        .get("assistant") as {
+        content: string;
+        tool_name: string;
+        tool_calls: string;
+        reasoning: string;
+      };
+
+      expect(assistant.content).toBe(
+        "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+      );
+      expect(assistant.content).not.toContain("[thinking]");
+      expect(assistant.reasoning).toContain("inspect the project registry");
+      expect(assistant.tool_name).toBe("Read");
+      expect(assistant.tool_calls).toContain(".poko/poko.json:45");
+      expect(assistant.tool_calls).toContain("schemaVersion=1");
+    } finally {
+      database.close();
+    }
   });
 
   test("syncs Codex project history into OpenClaw native history", async () => {
@@ -854,6 +1214,60 @@ describe("poko sync", () => {
       expect.objectContaining({ displayName: "Sync history" }),
     ]);
   });
+
+  test("renders OpenClaw feature annotations as typed content and tool result", async () => {
+    await configureRepoHistoryStore();
+    await seedCodexFeatureSession();
+
+    await runSync({
+      cwd,
+      agent: "openclaw",
+      logger: createMemoryLogger(),
+    });
+
+    const canonicalCwd = await canonicalPath(cwd);
+    const sessionDir = path.join(
+      openClawStateDir,
+      "agents",
+      "main",
+      "sessions",
+    );
+    const sessionFiles = (await listFiles(sessionDir)).filter((filePath) =>
+      filePath.endsWith(".jsonl"),
+    );
+    const rows = (await readFile(sessionFiles[0] ?? "", "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assistant = rows.find(
+      (row) =>
+        row.type === "message" &&
+        (row.message as { role?: string } | undefined)?.role === "assistant",
+    ) as { message?: { content?: Array<Record<string, unknown>> } };
+    const toolResult = rows.find(
+      (row) =>
+        row.type === "message" &&
+        (row.message as { role?: string } | undefined)?.role === "toolResult",
+    ) as { message?: Record<string, unknown> };
+
+    expect(rows[0]).toMatchObject({ cwd: canonicalCwd });
+    expect(assistant.message?.content?.map((part) => part.type)).toEqual([
+      "thinking",
+      "text",
+      "toolCall",
+    ]);
+    expect(JSON.stringify(assistant.message?.content)).not.toContain(
+      "[thinking]",
+    );
+    expect(JSON.stringify(assistant.message?.content)).not.toContain(
+      "[tool_use",
+    );
+    expect(toolResult.message).toMatchObject({
+      role: "toolResult",
+      toolName: "Read",
+      isError: false,
+    });
+  });
 });
 
 const makeRawSession = (
@@ -885,6 +1299,8 @@ const createT3CodeStateDb = (dbPath: string): void => {
   const database = new Database(dbPath);
 
   try {
+    // Match a minimally initialized T3 Code store. Projection tables are owned
+    // by T3 migrations and should not be pre-created by Poko test fixtures.
     database.run(`
       create table orchestration_events (
         sequence integer primary key autoincrement,
@@ -905,52 +1321,6 @@ const createT3CodeStateDb = (dbPath: string): void => {
     database.run(`
       create unique index idx_orch_events_stream_version
       on orchestration_events(aggregate_kind, stream_id, stream_version)
-    `);
-    database.run(`
-      create table projection_projects (
-        project_id text primary key,
-        title text not null,
-        workspace_root text not null,
-        scripts_json text not null,
-        created_at text not null,
-        updated_at text not null,
-        deleted_at text,
-        default_model_selection_json text
-      )
-    `);
-    database.run(`
-      create table projection_threads (
-        thread_id text primary key,
-        project_id text not null,
-        title text not null,
-        branch text,
-        worktree_path text,
-        latest_turn_id text,
-        created_at text not null,
-        updated_at text not null,
-        deleted_at text,
-        runtime_mode text not null default 'full-access',
-        interaction_mode text not null default 'default',
-        model_selection_json text,
-        archived_at text,
-        latest_user_message_at text,
-        pending_approval_count integer not null default 0,
-        pending_user_input_count integer not null default 0,
-        has_actionable_proposed_plan integer not null default 0
-      )
-    `);
-    database.run(`
-      create table projection_thread_messages (
-        message_id text primary key,
-        thread_id text not null,
-        turn_id text,
-        role text not null,
-        text text not null,
-        is_streaming integer not null,
-        created_at text not null,
-        updated_at text not null,
-        attachments_json text
-      )
     `);
   } finally {
     database.close();
@@ -1096,6 +1466,150 @@ const seedCodexSession = async (): Promise<void> => {
   await appendFile(
     path.join(codexHome, "session_index.jsonl"),
     `${JSON.stringify({ id: "sync-session", thread_name: "Sync history" })}\n`,
+    "utf8",
+  );
+};
+
+const seedCodexFeatureSession = async (): Promise<void> => {
+  const sessionPath = path.join(
+    codexHome,
+    "sessions/2026/05/29/rollout-2026-05-29T00-10-00-feature-session.jsonl",
+  );
+  await mkdir(path.dirname(sessionPath), { recursive: true });
+  await writeFile(
+    sessionPath,
+    [
+      JSON.stringify({
+        timestamp: "2026-05-29T00:10:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: "feature-session",
+          timestamp: "2026-05-29T00:10:00.000Z",
+          cwd,
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-29T00:10:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "Feature fixture: inspect .poko/poko.json:45 and preserve clickable path text.",
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-29T00:10:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: [
+                "[thinking] inspect the project registry before editing",
+                "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+                "Tool result: schemaVersion=1",
+              ].join("\n"),
+            },
+            {
+              type: "tool_use",
+              name: "Read",
+              input: { file_path: ".poko/poko.json:45" },
+            },
+          ],
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+  await mkdir(codexHome, { recursive: true });
+  await appendFile(
+    path.join(codexHome, "session_index.jsonl"),
+    `${JSON.stringify({ id: "feature-session", thread_name: "Feature fixture" })}\n`,
+    "utf8",
+  );
+};
+
+const seedClaudeFeatureSession = async (): Promise<void> => {
+  const sessionPath = path.join(
+    claudeHome,
+    "projects",
+    encodeClaudePath(cwd),
+    "00000000-0000-4000-8000-00000000f1a0.jsonl",
+  );
+  await mkdir(path.dirname(sessionPath), { recursive: true });
+  await writeFile(
+    sessionPath,
+    [
+      JSON.stringify({
+        parentUuid: null,
+        isSidechain: false,
+        type: "user",
+        message: {
+          role: "user",
+          content:
+            "Feature fixture: inspect .poko/poko.json:45 and preserve clickable path text.",
+        },
+        uuid: "00000000-0000-4000-8000-00000000f1a1",
+        timestamp: "2026-05-29T00:10:01.000Z",
+        userType: "external",
+        entrypoint: "cli",
+        cwd,
+        sessionId: "00000000-0000-4000-8000-00000000f1a0",
+        version: "2.1.156",
+        gitBranch: "main",
+      }),
+      JSON.stringify({
+        parentUuid: "00000000-0000-4000-8000-00000000f1a1",
+        isSidechain: false,
+        type: "assistant",
+        message: {
+          id: "msg_feature_claude",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [
+            {
+              type: "text",
+              text: [
+                "[thinking] inspect the project registry before editing",
+                "Feature matrix response: file path, reasoning marker, and tool marker preserved.",
+                "Tool result: schemaVersion=1",
+              ].join("\n"),
+            },
+            {
+              type: "tool_use",
+              id: "toolu_feature_read",
+              name: "Read",
+              input: { file_path: ".poko/poko.json:45" },
+            },
+          ],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+        requestId: null,
+        uuid: "00000000-0000-4000-8000-00000000f1a2",
+        timestamp: "2026-05-29T00:10:02.000Z",
+        userType: "external",
+        entrypoint: "cli",
+        cwd,
+        sessionId: "00000000-0000-4000-8000-00000000f1a0",
+        version: "2.1.156",
+        gitBranch: "main",
+      }),
+    ].join("\n"),
     "utf8",
   );
 };

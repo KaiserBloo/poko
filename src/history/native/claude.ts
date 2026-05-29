@@ -1,6 +1,7 @@
 import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import type { RawHistoryMessage, RawHistorySession } from "../types.ts";
+import { nativeMessageAnnotations } from "./annotations.ts";
 import {
   conversationMessages,
   countConversationMessages,
@@ -139,6 +140,24 @@ const renderClaudeSession = (
       }),
     );
     parentUuid = uuid;
+
+    if (message.role === "assistant") {
+      const toolResult = renderClaudeToolResult({
+        session,
+        sessionId,
+        assistantUuid: uuid,
+        parentUuid,
+        message,
+        index,
+        timestamp,
+        projectRoot,
+      });
+
+      if (toolResult) {
+        rows.push(toolResult);
+        parentUuid = toolResult.uuid;
+      }
+    }
   }
 
   const lastUserMessage = [...conversationMessages(session)]
@@ -197,7 +216,7 @@ const renderClaudeMessage = (input: {
       type: "message",
       role: "assistant",
       model: "poko-import",
-      content: [{ type: "text", text: input.message.text }],
+      content: renderClaudeAssistantContent(input.message, input.uuid),
       stop_reason: "end_turn",
       stop_sequence: null,
       usage: {
@@ -210,6 +229,101 @@ const renderClaudeMessage = (input: {
     requestId: null,
   };
 };
+
+const renderClaudeAssistantContent = (
+  message: RawHistoryMessage,
+  assistantUuid: string,
+): unknown[] => {
+  const annotations = nativeMessageAnnotations(message);
+  const content: unknown[] = [];
+
+  if (annotations.thinkingText) {
+    content.push({
+      type: "thinking",
+      thinking: annotations.thinkingText,
+      signature: "",
+    });
+  }
+
+  if (
+    annotations.visibleText ||
+    (!annotations.thinkingText && annotations.toolUses.length === 0)
+  ) {
+    content.push({
+      type: "text",
+      text: annotations.visibleText || message.text,
+    });
+  }
+
+  for (const [index, toolUse] of annotations.toolUses.entries()) {
+    content.push({
+      type: "tool_use",
+      id: claudeToolUseId(assistantUuid, toolUse.id, index),
+      name: toolUse.name,
+      input: toolUse.input,
+    });
+  }
+
+  return content;
+};
+
+const renderClaudeToolResult = (input: {
+  session: RawHistorySession;
+  sessionId: string;
+  assistantUuid: string;
+  parentUuid: string | null;
+  message: RawHistoryMessage;
+  index: number;
+  timestamp: string;
+  projectRoot: string;
+}): (Record<string, unknown> & { uuid: string }) | undefined => {
+  const annotations = nativeMessageAnnotations(input.message);
+  const firstToolUse = annotations.toolUses[0];
+
+  if (!annotations.toolResult || !firstToolUse) {
+    return undefined;
+  }
+
+  const uuid = deterministicUuid(
+    `poko:claude:tool-result:${input.session.sourceAgent}:${input.session.id}:${input.message.id ?? input.index}`,
+  );
+
+  return {
+    parentUuid: input.parentUuid,
+    isSidechain: false,
+    uuid,
+    timestamp: input.timestamp,
+    userType: "external",
+    entrypoint: "cli",
+    cwd: input.projectRoot,
+    sessionId: input.sessionId,
+    version: "poko-import",
+    gitBranch: "main",
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: claudeToolUseId(input.assistantUuid, firstToolUse.id, 0),
+          content: annotations.toolResult,
+        },
+      ],
+    },
+    toolUseResult: annotations.toolResult,
+    sourceToolAssistantUUID: input.assistantUuid,
+  };
+};
+
+const claudeToolUseId = (
+  assistantUuid: string,
+  existingId: string | undefined,
+  index: number,
+): string =>
+  existingId ??
+  `toolu_${deterministicUuid(`poko:claude:tool-use:${assistantUuid}:${index}`)
+    .replaceAll("-", "")
+    .slice(0, 24)}`;
 
 const cleanupStalePokoClaudeImports = async (
   projectDir: string,

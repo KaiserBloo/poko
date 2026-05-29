@@ -1,0 +1,13 @@
+services:
+  poko-lab:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+    working_dir: /workspace/poko
+    environment:
+      POKO_LAB_ROOT: /lab-state
+    volumes:
+      - ..:/workspace/poko
+      - ${HOME}/.poko/lab:/lab-state
+    stdin_open: true
+    tty: true

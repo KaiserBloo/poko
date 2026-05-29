@@ -144,6 +144,21 @@ bun run check
 bun run build
 ```
 
+Use the reversible lab harness when testing native history sync against isolated
+agent homes:
+
+```sh
+bun run lab:reset
+bun run lab:smoke
+bun run lab:scenario -- all-to-all --write
+```
+
+The lab keeps disposable run state under `~/.poko/lab` and preserves signed-in
+baselines unless you explicitly run `bun lab/poko-lab.ts reset --include-auth
+--yes`. When noVNC sign-in is flaky, `bun lab/poko-lab.ts import-auth` can copy
+selected local auth/profile state into that lab-only baseline. See
+`lab/README.md` for seeded scenarios, the Docker flow, and the noVNC GUI lane.
+
 Standalone binaries can be added later with:
 
 ```sh
