@@ -1,0 +1,9 @@
+node_modules/
+dist/
+bin/
+.DS_Store
+*.tmp
+.poko/history/
+.poko/handoffs/
+.poko/native/
+.research/

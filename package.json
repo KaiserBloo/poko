@@ -1,0 +1,47 @@
+{
+  "name": "poko",
+  "version": "0.1.0",
+  "description": "Your pocket context buddy for AI coding agents.",
+  "type": "module",
+  "bin": {
+    "poko": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "build": "bun build ./src/cli.ts --outdir ./dist --target bun",
+    "compile": "bun build ./src/cli.ts --compile --outfile ./bin/poko"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "context",
+    "claude",
+    "cursor",
+    "aider",
+    "gemini",
+    "codex"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "picocolors": "^1.1.1",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.16",
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  }
+}
