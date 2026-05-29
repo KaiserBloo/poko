@@ -28,7 +28,7 @@ describe("poko init", () => {
     );
     expect(
       await readFile(path.join(cwd, ".poko/skills/README.md"), "utf8"),
-    ).toContain("Poko Skills");
+    ).toContain("Project Skills");
   });
 
   test("does not overwrite existing files unless forced", async () => {

@@ -53,15 +53,20 @@ const renderSection = (
   heading: keyof PokoSections | string,
   content: string,
 ): string => {
-  if (!content.trim()) {
+  const body = stripTemplateComments(stripFirstHeading(content));
+
+  if (!body) {
     return "";
   }
 
-  return `## ${heading}\n\n${stripFirstHeading(content)}`;
+  return `## ${heading}\n\n${body}`;
 };
 
 const stripFirstHeading = (content: string): string =>
   content.replace(/^#\s+.+\n\n?/, "").trim();
+
+const stripTemplateComments = (content: string): string =>
+  content.replace(/<!--[\s\S]*?-->/g, "").trim();
 
 const renderMcpSummary = (servers: Record<string, McpServer>): string => {
   const entries = Object.entries(servers);

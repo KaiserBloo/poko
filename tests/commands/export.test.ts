@@ -26,6 +26,7 @@ describe("poko export", () => {
 
     expect(output).toContain("# .cursor/rules/poko.mdc");
     expect(output).toContain("Cursor Project Context");
+    expect(output).not.toContain("Add durable instructions");
     expect(logger.messages.join("\n")).toContain(".cursor/rules/poko.mdc");
   });
 

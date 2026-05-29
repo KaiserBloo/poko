@@ -61,33 +61,22 @@ export const DEFAULT_POKO_CONFIG = `{
 
 export const DEFAULT_RULES = `# Project Rules
 
-- Prefer small, well-tested changes.
-- Follow the existing architecture and naming conventions before adding new patterns.
-- Keep generated files, secrets, and machine-specific state out of commits.
-- Explain risky tradeoffs before making broad changes.
+<!-- Add durable instructions that every agent should follow in this project. -->
 `;
 
 export const DEFAULT_MEMORY = `# Project Memory
 
-- Product: poko.sh is a pocket context buddy for AI coding tools.
-- Source of truth: edit files in .poko/, then run poko sync.
-- Local-first behavior is free forever.
+<!-- Add stable project facts, decisions, and gotchas here. -->
 `;
 
 export const DEFAULT_STYLE = `# Coding Style
 
-- Use clear names and straightforward control flow.
-- Keep comments useful and sparse.
-- Prefer deterministic output for generated files.
-- Add tests around behavior that may drift across agent formats.
+<!-- Add project-specific naming, formatting, testing, and review preferences here. -->
 `;
 
 export const DEFAULT_STACK = `# Tech Stack
 
-- Runtime: Bun-first TypeScript.
-- CLI: small custom parser.
-- Testing: bun test.
-- Formatting and linting: Biome.
+<!-- Add the languages, frameworks, package managers, and important commands for this project. -->
 `;
 
 export const DEFAULT_MCP = `{
@@ -95,7 +84,7 @@ export const DEFAULT_MCP = `{
 }
 `;
 
-export const DEFAULT_SKILLS_README = `# Poko Skills
+export const DEFAULT_SKILLS_README = `# Project Skills
 
 Add project skills here when you want Poko to export them to agents that support skills.
 

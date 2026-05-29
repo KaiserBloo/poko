@@ -59,6 +59,11 @@ Useful aliases:
 
 Edit `.poko/`, then run `poko sync`.
 
+This repository commits `.poko/` as the source of truth and ignores generated
+agent outputs such as `CLAUDE.md`, `AGENTS.md`, `.cursor/`, and `opencode.json`.
+Other projects can choose to commit those generated files if that is useful for
+their team.
+
 By default, `--all` syncs every adapter enabled in `.poko/poko.json`. Gemini CLI is kept as a disabled legacy adapter; use `poko sync --agent gemini` if you still need it.
 
 Project sync also captures project-scoped chat/session history from enabled local importers and syncs it into native agent history when that target supports it. Native chat sync currently supports Claude Code, Cursor, T3 Code, OpenCode, and Codex. Cursor and T3 Code write to local SQLite state, so on macOS Poko warns that it needs to close the app, asks it to quit, waits until it is closed, performs the sync, then reopens it. Use `poko sync --no-history` when you only want static context files.
