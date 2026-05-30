@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import path from "node:path";
 import {
   findCursorWorkspaces,
+  listCursorWorkspaces,
+  normalizeCursorWorkspacePath,
   resolveCursorGlobalStateDbPath,
   resolveCursorWorkspaceStorageRoot,
 } from "../cursor-storage.ts";
@@ -28,41 +30,62 @@ export const cursorImporter: HistoryImporter = {
     const storageRoot = resolveCursorWorkspaceStorageRoot();
     const globalStateDbPath = resolveCursorGlobalStateDbPath();
     const workspaces = await findCursorWorkspaces(storageRoot, projectRoot);
-    const sessions: RawHistorySession[] = [];
+    return captureCursorWorkspaces(workspaces, globalStateDbPath, projectRoot);
+  },
+  async captureAll() {
+    const storageRoot = resolveCursorWorkspaceStorageRoot();
+    const globalStateDbPath = resolveCursorGlobalStateDbPath();
+    const workspaces = await listCursorWorkspaces(storageRoot);
+    return captureCursorWorkspaces(workspaces, globalStateDbPath);
+  },
+};
 
-    for (const workspace of workspaces) {
-      const nativeSessions = await readCursorNativeSessions({
-        projectRoot,
-        workspaceId: workspace.id,
-        workspaceDatabasePath: workspace.databasePath,
-        globalStateDbPath,
-      });
+const captureCursorWorkspaces = async (
+  workspaces: Awaited<ReturnType<typeof listCursorWorkspaces>>,
+  globalStateDbPath: string,
+  projectRootOverride?: string,
+): Promise<RawHistorySession[]> => {
+  const sessions: RawHistorySession[] = [];
 
-      if (nativeSessions.length > 0) {
-        sessions.push(...nativeSessions);
-        continue;
-      }
+  for (const workspace of workspaces) {
+    const projectRoot =
+      projectRootOverride ?? normalizeCursorWorkspacePath(workspace.folderUri);
 
-      const messages = await readCursorPromptMessages(workspace.databasePath);
-
-      if (messages.length > 0) {
-        sessions.push({
-          schemaVersion: 1,
-          id: `cursor-${path.basename(workspace.directory)}`,
-          sourceAgent: "cursor",
-          title: titleFrom("Cursor workspace prompts", messages),
-          projectRoot,
-          createdAt: messages[0]?.timestamp,
-          updatedAt: messages.at(-1)?.timestamp,
-          sourcePath: workspace.databasePath,
-          messages,
-          rawEvents: messages.map((message) => message.raw),
-        });
-      }
+    if (!projectRoot) {
+      continue;
     }
 
-    return sessions;
-  },
+    const nativeSessions = await readCursorNativeSessions({
+      projectRoot,
+      workspaceId: workspace.id,
+      workspaceDatabasePath: workspace.databasePath,
+      globalStateDbPath,
+    });
+
+    if (nativeSessions.length > 0) {
+      sessions.push(...nativeSessions);
+      continue;
+    }
+
+    const messages = await readCursorPromptMessages(workspace.databasePath);
+
+    if (messages.length > 0) {
+      sessions.push({
+        schemaVersion: 1,
+        id: `cursor-${path.basename(workspace.directory)}`,
+        sourceAgent: "cursor",
+        title: titleFrom("Cursor workspace prompts", messages),
+        projectRoot,
+        createdAt: messages[0]?.timestamp,
+        updatedAt: messages.at(-1)?.timestamp,
+        sourcePath: workspace.databasePath,
+        messages,
+        rawEvents: messages.map((message) => message.raw),
+      });
+    }
+  }
+
+  return sessions;
 };
 
 const readCursorNativeSessions = async (options: {

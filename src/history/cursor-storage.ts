@@ -44,6 +44,16 @@ export const findCursorWorkspaces = async (
   storageRoot: string,
   projectRoot: string,
 ): Promise<CursorWorkspace[]> => {
+  const workspaces = await listCursorWorkspaces(storageRoot);
+  return workspaces.filter(
+    (workspace) =>
+      normalizeCursorWorkspacePath(workspace.folderUri) === projectRoot,
+  );
+};
+
+export const listCursorWorkspaces = async (
+  storageRoot: string,
+): Promise<CursorWorkspace[]> => {
   if (!(await pathExists(storageRoot))) {
     return [];
   }
@@ -73,14 +83,13 @@ export const findCursorWorkspaces = async (
     };
     const folder = normalizeCursorWorkspacePath(raw.folder ?? raw.workspace);
 
-    if (folder === projectRoot) {
+    if (folder) {
       workspaces.push({
         id: entry.name,
         directory,
         workspacePath,
         databasePath,
-        folderUri:
-          raw.folder ?? raw.workspace ?? pathToFileURL(projectRoot).href,
+        folderUri: raw.folder ?? raw.workspace ?? pathToFileURL(folder).href,
       });
     }
   }

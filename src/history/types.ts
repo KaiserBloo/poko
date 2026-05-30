@@ -59,6 +59,7 @@ export type HistoryImporter = {
   id: HistoryAgent;
   displayName: string;
   capture(projectRoot: string): Promise<RawHistorySession[]>;
+  captureAll?(): Promise<RawHistorySession[]>;
 };
 
 export const resolveHistoryAgent = (

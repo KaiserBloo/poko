@@ -9,6 +9,7 @@ describe("cli", () => {
 
     expect(code).toBe(0);
     expect(logger.messages.join("\n")).toContain("poko init");
+    expect(logger.messages.join("\n")).toContain("poko sync --global");
   });
 
   test("shows command help for doctor --help", async () => {

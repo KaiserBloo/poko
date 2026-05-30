@@ -37,79 +37,95 @@ export const hermesImporter: HistoryImporter = {
   id: "hermes",
   displayName: "Hermes Agent",
   async capture(projectRoot) {
-    const dbPath = resolveHermesStateDbPath();
-    let database: Database;
+    return captureHermesSessions(projectRoot);
+  },
+  async captureAll() {
+    return captureHermesSessions();
+  },
+};
 
-    try {
-      database = new Database(dbPath, { readonly: true });
-    } catch {
+const captureHermesSessions = async (
+  projectRoot?: string,
+): Promise<RawHistorySession[]> => {
+  const dbPath = resolveHermesStateDbPath();
+  let database: Database;
+
+  try {
+    database = new Database(dbPath, { readonly: true });
+  } catch {
+    return [];
+  }
+
+  try {
+    database.run("pragma busy_timeout = 1000");
+
+    if (
+      !tableExists(database, "sessions") ||
+      !tableExists(database, "messages")
+    ) {
       return [];
     }
 
-    try {
-      database.run("pragma busy_timeout = 1000");
+    const acceptedRoots = unique([
+      projectRoot,
+      projectRoot ? await resolveCanonicalProjectRoot(projectRoot) : undefined,
+    ]);
+    const rows = database
+      .query(
+        "select id, source, model, model_config, system_prompt, started_at, ended_at, title from sessions order by started_at desc",
+      )
+      .all() as HermesSessionRow[];
+    const sessions: RawHistorySession[] = [];
 
-      if (
-        !tableExists(database, "sessions") ||
-        !tableExists(database, "messages")
-      ) {
-        return [];
+    for (const row of rows) {
+      const modelConfig = parseJsonObject(row.model_config);
+
+      if (isPokoHermesImport(row, modelConfig)) {
+        continue;
       }
 
-      const acceptedRoots = unique([
-        projectRoot,
-        await resolveCanonicalProjectRoot(projectRoot),
-      ]);
-      const rows = database
+      const sessionProjectRoot =
+        projectRoot ?? projectRootFromHermes(row, modelConfig);
+
+      if (!sessionProjectRoot) {
+        continue;
+      }
+
+      if (projectRoot && !matchesProject(row, modelConfig, acceptedRoots)) {
+        continue;
+      }
+
+      const messageRows = database
         .query(
-          "select id, source, model, model_config, system_prompt, started_at, ended_at, title from sessions order by started_at desc",
+          "select id, role, content, timestamp from messages where session_id = ? order by id",
         )
-        .all() as HermesSessionRow[];
-      const sessions: RawHistorySession[] = [];
+        .all(row.id) as HermesMessageRow[];
+      const messages = dedupeMessages(
+        messageRows.flatMap(extractHermesMessage),
+      );
 
-      for (const row of rows) {
-        const modelConfig = parseJsonObject(row.model_config);
-
-        if (isPokoHermesImport(row, modelConfig)) {
-          continue;
-        }
-
-        if (!matchesProject(row, modelConfig, acceptedRoots)) {
-          continue;
-        }
-
-        const messageRows = database
-          .query(
-            "select id, role, content, timestamp from messages where session_id = ? order by id",
-          )
-          .all(row.id) as HermesMessageRow[];
-        const messages = dedupeMessages(
-          messageRows.flatMap(extractHermesMessage),
-        );
-
-        if (messages.length === 0) {
-          continue;
-        }
-
-        sessions.push({
-          schemaVersion: 1,
-          id: row.id,
-          sourceAgent: "hermes",
-          title: row.title?.trim() || titleFrom("Hermes session", messages),
-          projectRoot,
-          createdAt: secondsToIso(row.started_at),
-          updatedAt: secondsToIso(row.ended_at ?? latestSeconds(messageRows)),
-          sourcePath: dbPath,
-          messages,
-          rawEvents: messageRows,
-        });
+      if (messages.length === 0) {
+        continue;
       }
 
-      return sessions;
-    } finally {
-      database.close();
+      sessions.push({
+        schemaVersion: 1,
+        id: row.id,
+        sourceAgent: "hermes",
+        title: row.title?.trim() || titleFrom("Hermes session", messages),
+        projectRoot: sessionProjectRoot,
+        createdAt: secondsToIso(row.started_at),
+        updatedAt: secondsToIso(row.ended_at ?? latestSeconds(messageRows)),
+        sourcePath: dbPath,
+        messages,
+        rawEvents: messageRows,
+      });
     }
-  },
+
+    return sessions;
+  } finally {
+    database.close();
+  }
 };
 
 const extractHermesMessage = (row: HermesMessageRow): RawHistoryMessage[] => {
@@ -166,6 +182,20 @@ const matchesProject = (
     acceptedRoots.includes(projectRoot ?? "") ||
     acceptedRoots.includes(cwd ?? "")
   );
+};
+
+const projectRootFromHermes = (
+  row: HermesSessionRow,
+  modelConfig: Record<string, unknown> | undefined,
+): string | undefined =>
+  nestedString(modelConfig, ["cwd"]) ??
+  nestedString(modelConfig, ["projectRoot"]) ??
+  nestedString(modelConfig, ["workspace", "cwd"]) ??
+  projectRootFromPrompt(row.system_prompt ?? "");
+
+const projectRootFromPrompt = (prompt: string): string | undefined => {
+  const match = prompt.match(/(?:cwd|projectRoot|workspace)[:=]\s*([^\s]+)/i);
+  return match?.[1];
 };
 
 const isPokoHermesImport = (

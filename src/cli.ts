@@ -57,6 +57,7 @@ export const run = async (
           cwd,
           agent: flagString(parsed.flags.agent),
           all: Boolean(parsed.flags.all),
+          global: Boolean(parsed.flags.global),
           dryRun: Boolean(parsed.flags["dry-run"]),
           noHistory: Boolean(parsed.flags["no-history"]),
           backup: Boolean(parsed.flags.backup),
@@ -72,6 +73,7 @@ export const run = async (
         cwd,
         agent: flagString(parsed.flags.agent),
         all: Boolean(parsed.flags.all),
+        global: Boolean(parsed.flags.global),
         dryRun: Boolean(parsed.flags["dry-run"]),
         noHistory: Boolean(parsed.flags["no-history"]),
         backup: Boolean(parsed.flags.backup),
@@ -286,6 +288,7 @@ export const helpText =
 Usage:
   poko init [--yes] [--force]
   poko sync [--all] [--agent <agent>] [--dry-run] [--diff] [--backup] [--no-history] [--json]
+  poko sync --global [--all] [--agent <agent>] [--dry-run] [--json]
   poko export <agent> [--stdout] [--dry-run] [--diff] [--backup]
   poko capture [agent|--all] [--store local|repo|both] [--dry-run] [--include-previous] [--json]
   poko history [--store local|repo|both] [--json]
@@ -302,6 +305,7 @@ Aliases:
 Examples:
   poko init
   poko sync --all
+  poko sync --global --all --dry-run
   poko status
   poko doctor
   poko capture --all
@@ -321,10 +325,12 @@ Options:
 const syncHelpText = (): string => `${pc.bold("poko sync")}
 
 Detects installed/configured agents and writes their project context files and native chat history.
+With --global, syncs all locally discoverable project chat history into native agent stores.
 
 Options:
   --all             Sync every enabled adapter
   --agent <agent>   Sync one adapter
+  --global          Sync all discoverable local project histories; no static files are written
   --dry-run         Show what would change without writing files
   --diff            With --dry-run, print line-level static file changes
   --backup          Back up overwritten static files under .poko/backups/

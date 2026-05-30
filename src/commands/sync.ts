@@ -5,10 +5,21 @@ import {
   resolveAgentId,
   supportedAgentList,
 } from "../adapters/types.ts";
-import { loadPokoContext, type PokoConfig } from "../core/config.ts";
+import {
+  BunFileMissingError,
+  createDefaultPokoConfig,
+  loadPokoConfig,
+  loadPokoContext,
+  type PokoConfig,
+} from "../core/config.ts";
 import type { Logger } from "../core/logger.ts";
 import { applyWritePlan, type WriteResult } from "../core/writer.ts";
+import {
+  buildGlobalHistorySync,
+  type GlobalHistorySyncResult,
+} from "../history/global-sync.ts";
 import { formatNativeDetails } from "../history/native/format.ts";
+import { NATIVE_HISTORY_TARGET_IDS } from "../history/native/index.ts";
 import {
   buildProjectHistorySync,
   type ProjectHistorySyncResult,
@@ -19,6 +30,7 @@ export type SyncOptions = {
   cwd: string;
   agent?: string;
   all?: boolean;
+  global?: boolean;
   dryRun?: boolean;
   noHistory?: boolean;
   backup?: boolean;
@@ -30,6 +42,7 @@ export type SyncOptions = {
 export type SyncReport = {
   schemaVersion: 1;
   command: "sync";
+  mode: "project" | "global";
   generatedAt: string;
   root: string;
   dryRun: boolean;
@@ -46,10 +59,12 @@ export type SyncReport = {
       messages: number;
       updatedAt?: string;
       sourcePath?: string;
+      projectRoot?: string;
     }>;
     skippedOlderSessions: number;
     nativeTargets: Array<{
       target: string;
+      projectRoot?: string;
       location: string;
       sessions: number;
       messages: number;
@@ -57,6 +72,21 @@ export type SyncReport = {
       skipped: boolean;
       reason?: string;
       details?: Record<string, number | string | boolean>;
+    }>;
+  };
+  global?: {
+    projects: Array<{
+      root: string;
+      sessions: number;
+      messages: number;
+      sourceAgents: string[];
+    }>;
+    capturedAgents: Array<{
+      id: string;
+      displayName: string;
+      supported: boolean;
+      capturedSessions: number;
+      reason?: string;
     }>;
   };
   warnings: string[];
@@ -70,6 +100,10 @@ export const runSync = async (options: SyncOptions): Promise<WriteResult[]> => {
 export const runSyncReport = async (
   options: SyncOptions,
 ): Promise<SyncReport> => {
+  if (options.global) {
+    return runGlobalSyncReport(options);
+  }
+
   const context = await loadPokoContext(options.cwd);
 
   if (!options.quiet) {
@@ -90,6 +124,7 @@ export const runSyncReport = async (
     return {
       schemaVersion: 1,
       command: "sync",
+      mode: "project",
       generatedAt: new Date().toISOString(),
       root: context.root,
       dryRun: Boolean(options.dryRun),
@@ -143,6 +178,7 @@ export const runSyncReport = async (
   return {
     schemaVersion: 1,
     command: "sync",
+    mode: "project",
     generatedAt: new Date().toISOString(),
     root: context.root,
     dryRun: Boolean(options.dryRun),
@@ -163,6 +199,84 @@ export const runSyncReport = async (
   };
 };
 
+const runGlobalSyncReport = async (
+  options: SyncOptions,
+): Promise<SyncReport> => {
+  if (options.noHistory) {
+    throw new Error(
+      "`poko sync --global` is history-only; remove --no-history.",
+    );
+  }
+
+  const config = await loadOptionalPokoConfig(options.cwd);
+  const targetAgents = selectGlobalTargetAgents(options, config);
+
+  if (targetAgents.length === 0) {
+    if (!options.quiet) {
+      options.logger.warn("no native history targets are enabled.");
+    }
+
+    return {
+      schemaVersion: 1,
+      command: "sync",
+      mode: "global",
+      generatedAt: new Date().toISOString(),
+      root: options.cwd,
+      dryRun: Boolean(options.dryRun),
+      noHistory: false,
+      agents: [],
+      files: [],
+      changedFiles: 0,
+      history: {
+        enabled: true,
+        sessions: [],
+        skippedOlderSessions: 0,
+        nativeTargets: [],
+      },
+      global: {
+        projects: [],
+        capturedAgents: [],
+      },
+      warnings: [],
+    };
+  }
+
+  const globalSync = await buildGlobalHistorySync({
+    cwd: options.cwd,
+    config,
+    targetAgents,
+    dryRun: options.dryRun,
+    logger: options.quiet ? undefined : options.logger,
+  });
+
+  if (!options.quiet) {
+    reportGlobalHistorySync(
+      globalSync,
+      options.logger,
+      Boolean(options.dryRun),
+    );
+  }
+
+  return {
+    schemaVersion: 1,
+    command: "sync",
+    mode: "global",
+    generatedAt: new Date().toISOString(),
+    root: options.cwd,
+    dryRun: Boolean(options.dryRun),
+    noHistory: false,
+    agents: targetAgents,
+    files: [],
+    changedFiles: 0,
+    history: summarizeGlobalHistorySync(globalSync),
+    global: {
+      projects: globalSync.projects,
+      capturedAgents: globalSync.capturedAgents,
+    },
+    warnings: globalSync.warnings,
+  };
+};
+
 const summarizeHistorySync = (
   result: ProjectHistorySyncResult,
 ): NonNullable<SyncReport["history"]> => ({
@@ -178,6 +292,75 @@ const summarizeHistorySync = (
   skippedOlderSessions: result.skipped.length,
   nativeTargets: result.nativeTargets.map((target) => ({ ...target })),
 });
+
+const summarizeGlobalHistorySync = (
+  result: GlobalHistorySyncResult,
+): NonNullable<SyncReport["history"]> => ({
+  enabled: true,
+  sessions: result.sessions.map((session) => ({
+    id: session.id,
+    title: session.title,
+    sourceAgent: session.sourceAgent,
+    messages: session.messages.length,
+    updatedAt: session.updatedAt,
+    sourcePath: session.sourcePath,
+    projectRoot: session.projectRoot,
+  })),
+  skippedOlderSessions: 0,
+  nativeTargets: result.nativeTargets.map((target) => ({ ...target })),
+});
+
+const reportGlobalHistorySync = (
+  result: GlobalHistorySyncResult,
+  logger: Logger,
+  dryRun: boolean,
+): void => {
+  logger.info(
+    `${dryRun ? "would include" : "included"} ${result.sessions.length} global history session(s) across ${result.projects.length} project(s).`,
+  );
+
+  for (const project of result.projects) {
+    logger.plain(
+      [
+        `- ${project.root}`,
+        `  sessions: ${project.sessions}`,
+        `  messages: ${project.messages}`,
+        `  sources: ${project.sourceAgents.join(", ")}`,
+      ].join("\n"),
+    );
+  }
+
+  for (const nativeTarget of result.nativeTargets) {
+    const projectSuffix = nativeTarget.projectRoot
+      ? ` for ${nativeTarget.projectRoot}`
+      : "";
+
+    if (nativeTarget.skipped) {
+      logger.warn(
+        `${nativeTarget.target} native global chat sync skipped${projectSuffix}: ${nativeTarget.reason ?? "unknown reason"}`,
+      );
+      reportNativeTargetDetails(
+        nativeTarget.location,
+        nativeTarget.details,
+        logger,
+      );
+      continue;
+    }
+
+    logger.info(
+      `${dryRun ? "would sync" : "synced"} ${nativeTarget.sessions} session(s), ${nativeTarget.messages} message(s) into ${nativeTarget.target} native history${projectSuffix}.`,
+    );
+    reportNativeTargetDetails(
+      nativeTarget.location,
+      nativeTarget.details,
+      logger,
+    );
+  }
+
+  for (const warning of result.warnings) {
+    logger.warn(warning);
+  }
+};
 
 const reportHistorySync = (
   result: ProjectHistorySyncResult | undefined,
@@ -288,6 +471,35 @@ const selectAdapters = async (
   return detections
     .filter(({ detection }) => detection.detected)
     .map(({ adapter }) => adapter);
+};
+
+const selectGlobalTargetAgents = (
+  options: SyncOptions,
+  config: PokoConfig,
+): AgentId[] => {
+  if (options.agent) {
+    const agent = parseAgentId(options.agent);
+    return isNativeHistoryTarget(agent) ? [agent] : [];
+  }
+
+  return ADAPTERS.filter((adapter) => isEnabled(config, adapter.id))
+    .map((adapter) => adapter.id)
+    .filter(isNativeHistoryTarget);
+};
+
+const isNativeHistoryTarget = (agent: AgentId): boolean =>
+  (NATIVE_HISTORY_TARGET_IDS as AgentId[]).includes(agent);
+
+const loadOptionalPokoConfig = async (root: string): Promise<PokoConfig> => {
+  try {
+    return await loadPokoConfig(root);
+  } catch (error) {
+    if (error instanceof BunFileMissingError) {
+      return createDefaultPokoConfig();
+    }
+
+    throw error;
+  }
 };
 
 const reportWriteResults = (

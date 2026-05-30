@@ -38,21 +38,35 @@ export const openClawImporter: HistoryImporter = {
 
     return captureOpenClawFiles(projectRoot, acceptedRoots, unique(files));
   },
+  async captureAll() {
+    const sessionDirs = await resolveOpenClawCandidateSessionDirs();
+    const files = (
+      await Promise.all(
+        sessionDirs.map((directory) =>
+          walkFiles(directory, (filePath) => filePath.endsWith(".jsonl")),
+        ),
+      )
+    ).flat();
+
+    return captureOpenClawFiles(undefined, undefined, unique(files));
+  },
 };
 
 const captureOpenClawFiles = async (
-  projectRoot: string,
-  acceptedProjectRoots: string[],
+  projectRoot: string | undefined,
+  acceptedProjectRoots: string[] | undefined,
   files: string[],
 ): Promise<RawHistorySession[]> => {
-  const acceptedRootSet = new Set(acceptedProjectRoots);
+  const acceptedRootSet = acceptedProjectRoots
+    ? new Set(acceptedProjectRoots)
+    : undefined;
   const sessions = new Map<string, RawHistorySession>();
 
   for (const filePath of files) {
     const rows = await readJsonl(filePath);
     const header = rows.find(isOpenClawSessionHeader);
 
-    if (!header || !acceptedRootSet.has(header.cwd)) {
+    if (!header || (acceptedRootSet && !acceptedRootSet.has(header.cwd))) {
       continue;
     }
 
@@ -71,7 +85,7 @@ const captureOpenClawFiles = async (
       id: header.id,
       sourceAgent: "openclaw",
       title: openClawSessionTitle(rows, messages),
-      projectRoot,
+      projectRoot: projectRoot ?? header.cwd,
       createdAt: header.timestamp,
       updatedAt: latestTimestamp(rows, messages) ?? header.timestamp,
       sourcePath: filePath,

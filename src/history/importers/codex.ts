@@ -19,52 +19,63 @@ export const codexImporter: HistoryImporter = {
   id: "codex",
   displayName: "Codex",
   async capture(projectRoot) {
-    const codexHome = process.env.CODEX_HOME ?? homePath(".codex");
-    const sessionFiles = [
-      ...(await walkFiles(path.join(codexHome, "sessions"), (filePath) =>
-        filePath.endsWith(".jsonl"),
-      )),
-      ...(await walkFiles(
-        path.join(codexHome, "archived_sessions"),
-        (filePath) => filePath.endsWith(".jsonl"),
-      )),
-    ];
-    const titleById = await loadCodexTitles(codexHome);
-    const sessions: RawHistorySession[] = [];
+    return captureCodexSessions(projectRoot);
+  },
+  async captureAll() {
+    return captureCodexSessions();
+  },
+};
 
-    for (const filePath of sessionFiles) {
-      const events = await readJsonl(filePath);
-      const meta = events.find(isCodexMeta);
+const captureCodexSessions = async (
+  projectRoot?: string,
+): Promise<RawHistorySession[]> => {
+  const codexHome = process.env.CODEX_HOME ?? homePath(".codex");
+  const sessionFiles = [
+    ...(await walkFiles(path.join(codexHome, "sessions"), (filePath) =>
+      filePath.endsWith(".jsonl"),
+    )),
+    ...(await walkFiles(path.join(codexHome, "archived_sessions"), (filePath) =>
+      filePath.endsWith(".jsonl"),
+    )),
+  ];
+  const titleById = await loadCodexTitles(codexHome);
+  const sessions: RawHistorySession[] = [];
 
-      if (meta?.payload.cwd !== projectRoot) {
-        continue;
-      }
+  for (const filePath of sessionFiles) {
+    const events = await readJsonl(filePath);
+    const meta = events.find(isCodexMeta);
 
-      if (isPokoCodexImport(meta) || isCodexSubagentSession(meta)) {
-        continue;
-      }
-
-      const messages = dedupeAdjacentMessages(
-        dedupeMessages(events.flatMap(extractCodexMessage)),
-      );
-      const id = meta.payload.id;
-
-      sessions.push({
-        schemaVersion: 1,
-        id,
-        sourceAgent: "codex",
-        title: titleById.get(id) ?? titleFrom("Codex session", messages),
-        projectRoot,
-        createdAt: meta.payload.timestamp,
-        updatedAt: latestTimestamp(messages) ?? meta.payload.timestamp,
-        sourcePath: filePath,
-        messages,
-        rawEvents: messages.map((message) => message.raw),
-      });
+    if (
+      !meta?.payload.cwd ||
+      (projectRoot && meta.payload.cwd !== projectRoot)
+    ) {
+      continue;
     }
 
-    return sessions;
-  },
+    if (isPokoCodexImport(meta) || isCodexSubagentSession(meta)) {
+      continue;
+    }
+
+    const messages = dedupeAdjacentMessages(
+      dedupeMessages(events.flatMap(extractCodexMessage)),
+    );
+    const id = meta.payload.id;
+
+    sessions.push({
+      schemaVersion: 1,
+      id,
+      sourceAgent: "codex",
+      title: titleById.get(id) ?? titleFrom("Codex session", messages),
+      projectRoot: meta.payload.cwd,
+      createdAt: meta.payload.timestamp,
+      updatedAt: latestTimestamp(messages) ?? meta.payload.timestamp,
+      sourcePath: filePath,
+      messages,
+      rawEvents: messages.map((message) => message.raw),
+    });
+  }
+
+  return sessions;
 };
 
 const loadCodexTitles = async (

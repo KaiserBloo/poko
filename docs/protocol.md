@@ -106,6 +106,68 @@ Runs sync and returns file and history outcomes.
 Use `--dry-run --json` for app previews. Use `--backup --json` when the app is
 executing a user-approved write.
 
+### `poko sync --global --json`
+
+Runs an all-project native history sync. This command does not write static
+agent files and does not require the current working directory to contain
+`.poko/`; when a discovered project has no `.poko/poko.json`, the CLI uses
+default local history settings for that project.
+
+```json
+{
+  "schemaVersion": 1,
+  "command": "sync",
+  "mode": "global",
+  "dryRun": true,
+  "agents": ["claude", "cursor"],
+  "files": [],
+  "changedFiles": 0,
+  "history": {
+    "enabled": true,
+    "sessions": [
+      {
+        "id": "session-id",
+        "sourceAgent": "codex",
+        "title": "Same conversation everywhere",
+        "projectRoot": "/path/to/project",
+        "messages": 42
+      }
+    ],
+    "skippedOlderSessions": 0,
+    "nativeTargets": [
+      {
+        "target": "claude",
+        "projectRoot": "/path/to/project",
+        "location": "~/.claude/projects/...",
+        "sessions": 1,
+        "messages": 42,
+        "dryRun": true,
+        "skipped": false
+      }
+    ]
+  },
+  "global": {
+    "projects": [
+      {
+        "root": "/path/to/project",
+        "sessions": 1,
+        "messages": 42,
+        "sourceAgents": ["codex"]
+      }
+    ],
+    "capturedAgents": [
+      {
+        "id": "codex",
+        "displayName": "Codex",
+        "supported": true,
+        "capturedSessions": 1
+      }
+    ]
+  },
+  "warnings": []
+}
+```
+
 ### `poko capture --json`
 
 Captures project history and reports per-importer counts.
@@ -162,5 +224,7 @@ directory when operating on a selected project. The initial app MVP only needs:
 - `history --json` for the latest conversation list
 - `sync --dry-run --json` for preview
 - `sync --backup --json` for user-approved writes
+- `sync --global --all --dry-run --json` for all-project previews
+- `sync --global --all --json` for user-approved all-project writes
 
 The app should never parse human logs, ANSI color, or markdown handoff output.

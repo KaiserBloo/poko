@@ -210,6 +210,9 @@ export type PokoContext = {
 
 export const POKO_DIR = ".poko";
 
+export const createDefaultPokoConfig = (): PokoConfig =>
+  PokoConfigSchema.parse({});
+
 export const loadPokoContext = async (root: string): Promise<PokoContext> => {
   const absoluteRoot = path.resolve(root);
   const pokoDir = path.join(absoluteRoot, POKO_DIR);

@@ -9,6 +9,7 @@ export type NativeHistorySyncOptions = {
   sessions: RawHistorySession[];
   dryRun?: boolean;
   logger?: Pick<Logger, "info" | "warn">;
+  scratchRoot?: string;
 };
 
 export type NativeHistorySyncResult = {

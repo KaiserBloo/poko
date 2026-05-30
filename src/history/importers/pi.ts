@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
-import { resolvePiCandidateSessionDirs } from "../pi.ts";
+import { resolvePiAgentDir, resolvePiCandidateSessionDirs } from "../pi.ts";
 import type {
   HistoryImporter,
   RawHistoryMessage,
@@ -35,21 +35,38 @@ export const piImporter: HistoryImporter = {
 
     return capturePiFiles(projectRoot, projectRoots, unique(files));
   },
+  async captureAll() {
+    const sessionDirs = unique([
+      path.join(resolvePiAgentDir(), "sessions"),
+      ...(await resolvePiCandidateSessionDirs([process.cwd()])),
+    ]);
+    const files = (
+      await Promise.all(
+        sessionDirs.map((directory) =>
+          walkFiles(directory, (filePath) => filePath.endsWith(".jsonl")),
+        ),
+      )
+    ).flat();
+
+    return capturePiFiles(undefined, undefined, unique(files));
+  },
 };
 
 const capturePiFiles = async (
-  projectRoot: string,
-  acceptedProjectRoots: string[],
+  projectRoot: string | undefined,
+  acceptedProjectRoots: string[] | undefined,
   files: string[],
 ): Promise<RawHistorySession[]> => {
-  const acceptedRootSet = new Set(acceptedProjectRoots);
+  const acceptedRootSet = acceptedProjectRoots
+    ? new Set(acceptedProjectRoots)
+    : undefined;
   const sessions = new Map<string, RawHistorySession>();
 
   for (const filePath of files) {
     const rows = await readJsonl(filePath);
     const header = rows.find(isPiSessionHeader);
 
-    if (!header || !acceptedRootSet.has(header.cwd)) {
+    if (!header || (acceptedRootSet && !acceptedRootSet.has(header.cwd))) {
       continue;
     }
 
@@ -68,7 +85,7 @@ const capturePiFiles = async (
       id: header.id,
       sourceAgent: "pi",
       title: piSessionTitle(rows, messages),
-      projectRoot,
+      projectRoot: projectRoot ?? header.cwd,
       createdAt: header.timestamp,
       updatedAt: latestTimestamp(rows, messages) ?? header.timestamp,
       sourcePath: filePath,

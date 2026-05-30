@@ -24,6 +24,10 @@ const NATIVE_HISTORY_SYNCERS: NativeHistorySyncer[] = [
   codexNativeSyncer,
 ];
 
+export const NATIVE_HISTORY_TARGET_IDS = NATIVE_HISTORY_SYNCERS.map(
+  (syncer) => syncer.id,
+);
+
 export const syncNativeHistoryTargets = async (
   options: {
     targetAgents: AgentId[];

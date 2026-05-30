@@ -39,60 +39,109 @@ export const claudeImporter: HistoryImporter = {
           );
 
     return captureClaudeFiles(
-      projectRoot,
-      [projectRoot, canonicalProjectRoot],
       [...files, ...fallbackFiles],
+      [projectRoot, canonicalProjectRoot],
+      projectRoot,
     );
+  },
+  async captureAll() {
+    const claudeHome =
+      process.env.CLAUDE_CONFIG_DIR ??
+      process.env.CLAUDE_HOME ??
+      homePath(".claude");
+    const files = await walkFiles(
+      path.join(claudeHome, "projects"),
+      (filePath) => filePath.endsWith(".jsonl"),
+    );
+
+    return captureClaudeFiles(files);
   },
 };
 
 const captureClaudeFiles = async (
-  projectRoot: string,
-  acceptedProjectRoots: string[],
   files: string[],
+  acceptedProjectRoots?: string[],
+  projectRootOverride?: string,
 ): Promise<RawHistorySession[]> => {
   const sessions = new Map<string, RawHistorySession>();
-  const acceptedRootSet = new Set(acceptedProjectRoots);
+  const acceptedRootSet = acceptedProjectRoots
+    ? new Set(acceptedProjectRoots)
+    : undefined;
 
   for (const filePath of files) {
     const rows = await readJsonl(filePath);
-    const matchingRows = rows.filter(
-      (row) =>
-        isRecord(row) &&
-        typeof row.cwd === "string" &&
-        acceptedRootSet.has(row.cwd) &&
-        typeof row.sessionId === "string",
-    );
+    const rowsBySession = groupClaudeRows(rows, acceptedRootSet);
 
-    if (matchingRows.length === 0) {
-      continue;
+    for (const matchingRows of rowsBySession.values()) {
+      if (matchingRows.some(isPokoClaudeImportRow)) {
+        continue;
+      }
+
+      const firstRow = matchingRows[0];
+
+      if (!firstRow) {
+        continue;
+      }
+
+      const messages = dedupeMessages(
+        matchingRows.flatMap(extractClaudeMessage),
+      );
+
+      if (messages.length === 0) {
+        continue;
+      }
+
+      sessions.set(`${firstRow.cwd}:${firstRow.sessionId}`, {
+        schemaVersion: 1,
+        id: firstRow.sessionId,
+        sourceAgent: "claude",
+        title: titleFrom("Claude Code session", messages),
+        projectRoot: projectRootOverride ?? firstRow.cwd,
+        createdAt: firstTimestamp(messages),
+        updatedAt: latestTimestamp(messages),
+        sourcePath: filePath,
+        messages,
+        rawEvents: messages.map((message) => message.raw),
+      });
     }
-
-    if (matchingRows.some(isPokoClaudeImportRow)) {
-      continue;
-    }
-
-    const sessionId = String(
-      (matchingRows[0] as { sessionId: string }).sessionId,
-    );
-    const messages = dedupeMessages(matchingRows.flatMap(extractClaudeMessage));
-
-    sessions.set(sessionId, {
-      schemaVersion: 1,
-      id: sessionId,
-      sourceAgent: "claude",
-      title: titleFrom("Claude Code session", messages),
-      projectRoot,
-      createdAt: firstTimestamp(messages),
-      updatedAt: latestTimestamp(messages),
-      sourcePath: filePath,
-      messages,
-      rawEvents: messages.map((message) => message.raw),
-    });
   }
 
   return [...sessions.values()];
 };
+
+type ClaudeSessionRow = Record<string, unknown> & {
+  cwd: string;
+  sessionId: string;
+};
+
+const groupClaudeRows = (
+  rows: unknown[],
+  acceptedRootSet?: Set<string>,
+): Map<string, ClaudeSessionRow[]> => {
+  const rowsBySession = new Map<string, ClaudeSessionRow[]>();
+
+  for (const row of rows) {
+    if (!isClaudeSessionRow(row)) {
+      continue;
+    }
+
+    if (acceptedRootSet && !acceptedRootSet.has(row.cwd)) {
+      continue;
+    }
+
+    const key = `${row.cwd}:${row.sessionId}`;
+    const sessionRows = rowsBySession.get(key) ?? [];
+    sessionRows.push(row);
+    rowsBySession.set(key, sessionRows);
+  }
+
+  return rowsBySession;
+};
+
+const isClaudeSessionRow = (row: unknown): row is ClaudeSessionRow =>
+  isRecord(row) &&
+  typeof row.cwd === "string" &&
+  typeof row.sessionId === "string";
 
 const extractClaudeMessage = (row: unknown): RawHistoryMessage[] => {
   if (!isRecord(row) || !isRecord(row.message)) {

@@ -57,7 +57,11 @@ export const openCodeNativeSyncer: NativeHistorySyncer = {
 export async function syncOpenCodeNativeHistory(
   options: NativeHistorySyncOptions,
 ): Promise<NativeHistorySyncResult> {
-  const nativeDir = path.join(options.root, ".poko", "native", "opencode");
+  const nativeDir = path.join(
+    options.scratchRoot ?? path.join(options.root, ".poko"),
+    "native",
+    "opencode",
+  );
   const sessions = nativeTargetSessions(options.sessions, "opencode");
   const messageCount = countConversationMessages(sessions);
 

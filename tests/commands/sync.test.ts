@@ -13,7 +13,7 @@ import {
 import path from "node:path";
 import { runCapture } from "../../src/commands/capture.ts";
 import { runInit } from "../../src/commands/init.ts";
-import { runSync } from "../../src/commands/sync.ts";
+import { runSync, runSyncReport } from "../../src/commands/sync.ts";
 import { syncNativeHistoryTargets } from "../../src/history/native/index.ts";
 import {
   syncT3CodeNativeHistory,
@@ -260,6 +260,132 @@ describe("poko sync", () => {
     expect(output).toContain("location:");
     expect(output).toContain("details:");
     expect(output).toContain("sessionsSkippedFromSameAgent=0");
+  });
+
+  test("global dry-run captures every Codex project and reports native targets", async () => {
+    const otherRoot = await makeTempDir();
+
+    try {
+      await seedCodexSession({
+        id: "global-current",
+        title: "Current global session",
+        projectRoot: cwd,
+      });
+      await seedCodexSession({
+        id: "global-other",
+        title: "Other global session",
+        projectRoot: otherRoot,
+        startedAt: "2026-05-29T00:10:00.000Z",
+      });
+
+      const report = await runSyncReport({
+        cwd,
+        global: true,
+        agent: "claude",
+        dryRun: true,
+        quiet: true,
+        logger: createMemoryLogger(),
+      });
+
+      expect(report.mode).toBe("global");
+      expect(report.files).toEqual([]);
+      expect(report.changedFiles).toBe(0);
+      expect(report.agents).toEqual(["claude"]);
+      expect(report.history?.sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "global-current",
+            projectRoot: cwd,
+            sourceAgent: "codex",
+          }),
+          expect.objectContaining({
+            id: "global-other",
+            projectRoot: otherRoot,
+            sourceAgent: "codex",
+          }),
+        ]),
+      );
+      expect(report.global?.projects).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ root: cwd, sessions: 1, messages: 2 }),
+          expect.objectContaining({
+            root: otherRoot,
+            sessions: 1,
+            messages: 2,
+          }),
+        ]),
+      );
+      expect(report.history?.nativeTargets).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            target: "claude",
+            projectRoot: cwd,
+            sessions: 1,
+            dryRun: true,
+          }),
+          expect.objectContaining({
+            target: "claude",
+            projectRoot: otherRoot,
+            sessions: 1,
+            dryRun: true,
+          }),
+        ]),
+      );
+    } finally {
+      await removeTempDir(otherRoot);
+    }
+  });
+
+  test("global sync writes per-project Claude native history", async () => {
+    const otherRoot = await makeTempDir();
+
+    try {
+      await seedCodexSession({
+        id: "global-write-current",
+        title: "Current project write",
+        projectRoot: cwd,
+      });
+      await seedCodexSession({
+        id: "global-write-other",
+        title: "Other project write",
+        projectRoot: otherRoot,
+        startedAt: "2026-05-29T00:20:00.000Z",
+      });
+
+      const report = await runSyncReport({
+        cwd,
+        global: true,
+        agent: "claude",
+        logger: createMemoryLogger(),
+      });
+
+      expect(report.mode).toBe("global");
+      expect(report.history?.nativeTargets).toHaveLength(2);
+
+      const currentProjectDir = path.join(
+        claudeHome,
+        "projects",
+        encodeClaudePath(await canonicalPath(cwd)),
+      );
+      const otherProjectDir = path.join(
+        claudeHome,
+        "projects",
+        encodeClaudePath(await canonicalPath(otherRoot)),
+      );
+
+      expect(
+        (await listFiles(currentProjectDir)).filter((filePath) =>
+          filePath.endsWith(".jsonl"),
+        ),
+      ).toHaveLength(1);
+      expect(
+        (await listFiles(otherProjectDir)).filter((filePath) =>
+          filePath.endsWith(".jsonl"),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await removeTempDir(otherRoot);
+    }
   });
 
   test("dry-run reports same-agent skips for every native target", async () => {
@@ -1431,10 +1557,20 @@ const configureRepoHistoryStore = async (): Promise<void> => {
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 };
 
-const seedCodexSession = async (): Promise<void> => {
+const seedCodexSession = async (
+  options: {
+    projectRoot?: string;
+    id?: string;
+    title?: string;
+    startedAt?: string;
+  } = {},
+): Promise<void> => {
+  const sessionId = options.id ?? "sync-session";
+  const startedAt = options.startedAt ?? "2026-05-29T00:00:00.000Z";
+  const startedSlug = startedAt.replaceAll(":", "-").replace(".000Z", "");
   const sessionPath = path.join(
     codexHome,
-    "sessions/2026/05/29/rollout-2026-05-29T00-00-00-sync-session.jsonl",
+    `sessions/2026/05/29/rollout-${startedSlug}-${sessionId}.jsonl`,
   );
   await mkdir(path.dirname(sessionPath), { recursive: true });
   await writeFile(
@@ -1444,9 +1580,9 @@ const seedCodexSession = async (): Promise<void> => {
         timestamp: "2026-05-29T00:00:00.000Z",
         type: "session_meta",
         payload: {
-          id: "sync-session",
-          timestamp: "2026-05-29T00:00:00.000Z",
-          cwd,
+          id: sessionId,
+          timestamp: startedAt,
+          cwd: options.projectRoot ?? cwd,
         },
       }),
       JSON.stringify({
@@ -1465,7 +1601,7 @@ const seedCodexSession = async (): Promise<void> => {
   await mkdir(codexHome, { recursive: true });
   await appendFile(
     path.join(codexHome, "session_index.jsonl"),
-    `${JSON.stringify({ id: "sync-session", thread_name: "Sync history" })}\n`,
+    `${JSON.stringify({ id: sessionId, thread_name: options.title ?? "Sync history" })}\n`,
     "utf8",
   );
 };
